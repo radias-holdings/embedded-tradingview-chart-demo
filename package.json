@@ -1,0 +1,15 @@
+{
+  "name": "tradingview-integration-demo",
+  "version": "1.0.0",
+  "description": "Integration demo for TradingView Lightweight Charts with a candle API",
+  "scripts": {
+    "start": "parcel index.html --host 0.0.0.0",
+    "build": "parcel build index.html"
+  },
+  "dependencies": {
+    "lightweight-charts": "^4.1.2"
+  },
+  "devDependencies": {
+    "parcel": "^2.11.0"
+  }
+}

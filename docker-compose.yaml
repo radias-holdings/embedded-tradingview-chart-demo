@@ -1,0 +1,19 @@
+services:
+  tradingview-demo:
+    build: .
+    ports:
+      - "1234:1234"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.parcel-cache
+    environment:
+      - NODE_ENV=development
+      # Credentials pass-through from host .env
+      - CLIENT_ID
+      - CLIENT_SECRET
+      - TOKEN_URL
+      - API_BASE_URL
+      - WS_BASE_URL
+      # Development settings
+      - CHOKIDAR_USEPOLLING=true
