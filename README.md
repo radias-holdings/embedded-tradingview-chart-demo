@@ -24,6 +24,7 @@ This is a JavaScript application that demonstrates using TradingView's Lightweig
    ```
    CLIENT_ID=your_client_id_here
    CLIENT_SECRET=your_client_secret_here
+   REFERER=your_referer_here
    ```
 
 ### Start the Application

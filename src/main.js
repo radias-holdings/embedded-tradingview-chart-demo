@@ -87,7 +87,8 @@ class TradingViewApp {
           <p>Please ensure you have a .env file with the following variables:</p>
           <pre style="background: #f5f5f5; padding: 10px; overflow: auto; text-align: left;">
 CLIENT_ID=your_client_id_here
-CLIENT_SECRET=your_client_secret_here</pre>
+CLIENT_SECRET=your_client_secret_here
+REFERER=your_referer_value_here</pre>
         `);
       } else {
         this.showError('Initialization Failed', `Failed to initialize services: ${error.message}`);

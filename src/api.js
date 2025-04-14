@@ -101,7 +101,7 @@ export class ApiService {
   async fetchCandles(symbol, width, options = {}) {
     const { limit, start, end } = options;
     
-    // Ensure timestamps are integers (no decimal places)
+    // Ensure timestamps are integers
     const formattedStart = start ? Math.floor(start) : undefined;
     const formattedEnd = end ? Math.floor(end) : undefined;
     
@@ -177,7 +177,6 @@ export class ApiService {
     this.wsConnecting = true;
     
     try {
-      // Get token for authentication
       const token = await this.authService.getToken();
       console.log('Got token for WebSocket connection');
       
