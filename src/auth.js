@@ -65,7 +65,6 @@ export class AuthService {
       formData.append('grant_type', 'client_credentials');
       formData.append('client_id', clientId);
       
-      // Basic auth header
       const authHeader = 'Basic ' + btoa(`${clientId}:${clientSecret}`);
       
       const response = await fetch(tokenUrl, {
