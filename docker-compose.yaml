@@ -12,6 +12,7 @@ services:
       # Credentials pass-through from host .env
       - CLIENT_ID
       - CLIENT_SECRET
+      - REFERER
       - TOKEN_URL
       - API_BASE_URL
       - WS_BASE_URL
