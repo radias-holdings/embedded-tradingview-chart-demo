@@ -226,19 +226,16 @@ REFERER=your_referer_value_here</pre>
     try {
       this.showLoading('Initializing...');
       
-      // Initialize services
       if (!this.initServices()) {
         this.hideLoading();
         return;
       }
       
-      // Initialize chart
       if (!this.initChart()) {
         this.hideLoading();
         return;
       }
       
-      // Set up event listeners
       if (!this.setupEventListeners()) {
         this.hideLoading();
         return;

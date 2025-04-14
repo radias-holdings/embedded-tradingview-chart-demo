@@ -1,8 +1,4 @@
 /**
- * Utility functions for working with candle data and time intervals
- */
-
-/**
  * Parses interval string into milliseconds
  */
 export function parseInterval(interval) {
@@ -28,31 +24,23 @@ export function parseInterval(interval) {
 }
 
 /**
- * Format price with appropriate precision based on symbol
+ * Format price with precision based on value.
+ * In future, use the digits from instrument data.
  */
-export function formatPrice(price, symbol) {
+export function formatPrice(price, _symbol) {
   if (price === undefined || price === null || isNaN(price)) {
     return 'N/A';
   }
   
-  // Select precision based on symbol type
-  let precision = 2; // Default for stocks
-  
-  if (symbol) {
-    if (symbol.includes('BTC') || symbol.includes('ETH')) {
-      if (price < 0.1) {
-        precision = 6;
-      } else if (price < 1) {
-        precision = 4;
-      } else if (price < 1000) {
-        precision = 2;
-      } else {
-        precision = 2;
-      }
-    } else if (symbol.includes('USD')) {
-      // Forex pairs typically use 4-5 decimal places
-      precision = 4;
-    }
+  let precision = undefined;
+
+  // Arbitrary... just a guide
+  if (price < 0.1) {
+    precision = 6;
+  } else if (price < 1) {
+    precision = 4;
+  } else {
+    precision = 2;
   }
   
   // Format the price with commas for thousands and fixed precision
