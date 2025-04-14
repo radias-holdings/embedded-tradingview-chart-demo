@@ -5,7 +5,9 @@ import {
   parseInterval,
   calculateDataRange,
   findNearestTradingDay,
-  calculateSubscriptionRange
+  calculateSubscriptionRange,
+  formatPrice,
+  formatDate
 } from './utils';
 
 /**
@@ -19,7 +21,6 @@ export class ChartComponent {
     // Chart state
     this.chart = null;
     this.candleSeries = null;
-    this.volumeSeries = null;
     this.symbol = null;
     this.interval = '1d';
     this.data = [];
@@ -28,8 +29,8 @@ export class ChartComponent {
     this.loadingPromise = null;
     this.lastLoadedRange = null;
     this.realtimeCallback = null;
-    this._volumeScale = 0.1; // Initial volume scale (small)
     this._timeRangeChangeTimeout = null;
+    this.tooltipElement = document.getElementById('tooltip-container');
     
     // Data cache
     this.dataCache = new Map();
@@ -50,27 +51,58 @@ export class ChartComponent {
     this.chart = createChart(this.container, {
       width: containerWidth,
       height: containerHeight,
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#D1D4DC',
-        rightOffset: 12,
-        barSpacing: 6,
-      },
-      rightPriceScale: {
-        borderColor: '#D1D4DC',
-      },
       layout: {
         background: { color: '#ffffff' },
-        textColor: '#191919',
+        textColor: '#263238',
+        fontSize: 12,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif',
       },
       grid: {
-        horzLines: { color: '#F0F3FA' },
-        vertLines: { color: '#F0F3FA' },
+        vertLines: { color: '#f0f3fa' },
+        horzLines: { color: '#f0f3fa' },
       },
       crosshair: {
         mode: 1,
-      }
+        vertLine: {
+          color: 'rgba(41, 98, 255, 0.3)',
+          width: 1,
+          style: 3, // Dashed
+          labelBackgroundColor: '#2962ff',
+        },
+        horzLine: {
+          color: 'rgba(41, 98, 255, 0.3)',
+          width: 1,
+          style: 3, // Dashed
+          labelBackgroundColor: '#2962ff',
+        },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: '#e0e4e8',
+        rightOffset: 12,
+        barSpacing: 6,
+        fixLeftEdge: true,
+        lockVisibleTimeRangeOnResize: true,
+        rightBarStaysOnScroll: true,
+        borderVisible: true,
+        visible: true,
+        timeFormat: this.getTimeFormatOptions(),
+      },
+      rightPriceScale: {
+        borderColor: '#e0e4e8',
+        autoScale: true,
+        scaleMargins: {
+          top: 0.1,
+          bottom: 0.1,
+        },
+      },
+      localization: {
+        priceFormatter: this.getPriceFormatter(),
+      },
+      handleScroll: {
+        vertTouchDrag: true,
+      },
     });
     
     // Add candlestick series
@@ -82,28 +114,143 @@ export class ChartComponent {
       wickDownColor: '#ef5350',
     });
     
-    // Add volume series - using a separate scale and very small size
-    this.volumeSeries = this.chart.addHistogramSeries({
-      color: '#26a69a',
-      priceFormat: {
-        type: 'volume',
-      },
-      priceScaleId: 'volume', // Use a separate price scale
-      // Make volume much smaller to avoid hiding candles
-      scaleMargins: {
-        top: 0.9, // Push volume to the very bottom
-        bottom: 0.02,
-      },
-      // Reduce visibility further
-      lastValueVisible: false,
-      priceLineVisible: false,
-    });
-    
     // Add event listeners
     window.addEventListener('resize', this.handleResize.bind(this));
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(
       this.handleTimeRangeChange.bind(this)
     );
+    
+    // Subscribe to crosshair move event for custom tooltip
+    this.chart.subscribeCrosshairMove(this.handleCrosshairMove.bind(this));
+  }
+  
+  /**
+   * Get custom price formatter
+   */
+  getPriceFormatter() {
+    return (price) => {
+      return formatPrice(price, this.symbol);
+    };
+  }
+  
+  /**
+   * Get time format options based on interval
+   */
+  getTimeFormatOptions() {
+    return '{yyyy}-{MM}-{dd} {HH}:{mm}';
+  }
+  
+  /**
+   * Handle crosshair move to display custom tooltip
+   */
+  handleCrosshairMove(param) {
+    if (!this.tooltipElement) return;
+    
+    // Hide tooltip when not on data
+    if (
+      param === undefined || 
+      param.time === undefined || 
+      param.point === undefined || 
+      param.point.x < 0 || 
+      param.point.y < 0
+    ) {
+      this.tooltipElement.classList.remove('visible');
+      return;
+    }
+    
+    // Find the data point
+    const dataPoint = this.findDataPointByTime(param.time);
+    if (!dataPoint) {
+      this.tooltipElement.classList.remove('visible');
+      return;
+    }
+    
+    // Calculate change and percent change
+    const change = dataPoint.close - dataPoint.open;
+    const percentChange = (change / dataPoint.open) * 100;
+    const changeClass = change >= 0 ? 'positive' : 'negative';
+    const signChar = change >= 0 ? '+' : '';
+    
+    // Format timestamp based on interval
+    const formattedDate = formatDate(dataPoint.time, this.interval);
+    
+    // Format volume with appropriate units
+    let formattedVolume = 'N/A';
+    if (dataPoint.volume !== undefined) {
+      if (dataPoint.volume >= 1000000000) {
+        formattedVolume = `${(dataPoint.volume / 1000000000).toFixed(2)}B`;
+      } else if (dataPoint.volume >= 1000000) {
+        formattedVolume = `${(dataPoint.volume / 1000000).toFixed(2)}M`;
+      } else if (dataPoint.volume >= 1000) {
+        formattedVolume = `${(dataPoint.volume / 1000).toFixed(2)}K`;
+      } else {
+        formattedVolume = dataPoint.volume.toLocaleString();
+      }
+    }
+    
+    // Update tooltip content
+    this.tooltipElement.innerHTML = `
+      <div class="tooltip-title">${this.symbol} - ${formattedDate}</div>
+      <div class="tooltip-data">
+        <div class="tooltip-label">Open:</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.open, this.symbol)}</div>
+        
+        <div class="tooltip-label">High:</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.high, this.symbol)}</div>
+        
+        <div class="tooltip-label">Low:</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.low, this.symbol)}</div>
+        
+        <div class="tooltip-label">Close:</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.close, this.symbol)}</div>
+        
+        <div class="tooltip-label">Volume:</div>
+        <div class="tooltip-value">${formattedVolume}</div>
+        
+        <div class="tooltip-label">Change:</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${formatPrice(change, this.symbol)}</div>
+        
+        <div class="tooltip-label">% Change:</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${percentChange.toFixed(2)}%</div>
+      </div>
+    `;
+    
+    // Position tooltip near the crosshair point but avoid the cursor
+    const chartRect = this.container.getBoundingClientRect();
+    const tooltipWidth = 220; // from CSS max-width
+    const tooltipHeight = 180; // approximate height based on content
+    
+    // Always position the tooltip to the top-right of the cursor with a fixed offset
+    // This ensures it's consistently visible and not under the mouse
+    let left = param.point.x + 20; // Offset to the right
+    let top = param.point.y - tooltipHeight - 10; // Offset above the cursor
+    
+    // If tooltip would go outside right edge, place it to the left of cursor instead
+    if (left + tooltipWidth > chartRect.width) {
+      left = param.point.x - tooltipWidth - 20;
+    }
+    
+    // If tooltip would go outside top edge, place it below cursor instead
+    if (top < 10) {
+      top = param.point.y + 20;
+    }
+    
+    // Keep tooltip within chart bounds
+    left = Math.max(10, Math.min(chartRect.width - tooltipWidth - 10, left));
+    top = Math.max(10, Math.min(chartRect.height - tooltipHeight - 10, top));
+    
+    this.tooltipElement.style.left = `${left}px`;
+    this.tooltipElement.style.top = `${top}px`;
+    this.tooltipElement.classList.add('visible');
+  }
+  
+  /**
+   * Find a data point by timestamp
+   */
+  findDataPointByTime(time) {
+    if (!this.data || !this.data.length) return null;
+    
+    return this.data.find(candle => candle.time === time);
   }
 
   /**
@@ -271,36 +418,10 @@ export class ChartComponent {
    * Update chart series with current data
    */
   updateSeries() {
-    if (!this.data || !this.candleSeries || !this.volumeSeries || this.data.length === 0) return;
+    if (!this.data || !this.candleSeries || this.data.length === 0) return;
     
     // Update candlestick series
     this.candleSeries.setData(this.data);
-    
-    // Make volume extremely small to avoid overlapping with candles
-    const maxVolume = Math.max(...this.data.map(item => item.volume || 0), 1);
-    
-    // Use an extremely small scale - 0.001 means volume is at most 0.1% of the price range
-    let volumeScale = 0.001;
-    
-    // Further reduce scale for larger volumes
-    if (maxVolume > 1000000) volumeScale = 0.0001;
-    else if (maxVolume > 100000) volumeScale = 0.0005;
-    else if (maxVolume > 10000) volumeScale = 0.001;
-    else if (maxVolume > 1000) volumeScale = 0.002;
-    
-    // Store scale for realtime updates
-    this._volumeScale = volumeScale;
-    
-    // Update volume series with scaled values and colors
-    const volumeData = this.data.map(item => ({
-      time: item.time,
-      value: (item.volume || 0) * volumeScale,
-      color: item.close >= item.open 
-        ? 'rgba(38, 166, 154, 0.5)' // Green with transparency
-        : 'rgba(239, 83, 80, 0.5)'  // Red with transparency
-    }));
-    
-    this.volumeSeries.setData(volumeData);
   }
 
   /**
@@ -333,7 +454,7 @@ export class ChartComponent {
         high: candle.high,
         low: candle.low,
         close: candle.close,
-        volume: candle.volume || 0
+        volume: candle.volume || 0 // Keep volume for the tooltip
       };
       
       // Update or add to data array
@@ -348,14 +469,6 @@ export class ChartComponent {
       
       // Update chart
       this.candleSeries.update(candleData);
-      
-      this.volumeSeries.update({
-        time: timestamp,
-        value: candleData.volume * this._volumeScale,
-        color: candleData.close >= candleData.open 
-          ? 'rgba(38, 166, 154, 0.5)' 
-          : 'rgba(239, 83, 80, 0.5)'
-      });
       
       // Update loaded range
       if (this.lastLoadedRange) {
@@ -510,6 +623,11 @@ export class ChartComponent {
     
     // Remove event listeners
     window.removeEventListener('resize', this.handleResize.bind(this));
+    
+    // Hide tooltip
+    if (this.tooltipElement) {
+      this.tooltipElement.classList.remove('visible');
+    }
     
     // Clear chart
     if (this.chart) {

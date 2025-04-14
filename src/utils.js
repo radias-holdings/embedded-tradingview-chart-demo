@@ -28,6 +28,112 @@ export function parseInterval(interval) {
 }
 
 /**
+ * Format price with appropriate precision based on symbol
+ */
+export function formatPrice(price, symbol) {
+  if (price === undefined || price === null || isNaN(price)) {
+    return 'N/A';
+  }
+  
+  // Select precision based on symbol type
+  let precision = 2; // Default for stocks
+  
+  if (symbol) {
+    if (symbol.includes('BTC') || symbol.includes('ETH')) {
+      if (price < 0.1) {
+        precision = 6;
+      } else if (price < 1) {
+        precision = 4;
+      } else if (price < 1000) {
+        precision = 2;
+      } else {
+        precision = 2;
+      }
+    } else if (symbol.includes('USD')) {
+      // Forex pairs typically use 4-5 decimal places
+      precision = 4;
+    }
+  }
+  
+  // Format the price with commas for thousands and fixed precision
+  return price.toLocaleString('en-US', {
+    minimumFractionDigits: precision,
+    maximumFractionDigits: precision
+  });
+}
+
+/**
+ * Format date based on interval
+ */
+export function formatDate(timestamp, interval) {
+  if (!timestamp) return 'N/A';
+  
+  const date = new Date(timestamp * 1000);
+  
+  // Get interval details
+  let unit = 'd';
+  let value = 1;
+  
+  if (interval && typeof interval === 'string') {
+    unit = interval.slice(-1);
+    value = parseInt(interval.slice(0, -1), 10);
+  }
+  
+  // Different formats based on interval
+  if (unit === 'm') {
+    // Minutes
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: 'numeric'
+    }) + ' ' + date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } else if (unit === 'h') {
+    // Hours
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: 'numeric'
+    }) + ' ' + date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } else if (unit === 'd') {
+    // Days
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: 'numeric' 
+    });
+  } else if (unit === 'w') {
+    // Weeks
+    return 'Week of ' + date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: 'numeric' 
+    });
+  } else if (unit === 'o') {
+    // Months
+    return date.toLocaleDateString('en-US', { 
+      month: 'long',
+      year: 'numeric' 
+    });
+  } else {
+    // Fallback
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: 'numeric' 
+    }) + ' ' + date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+}
+
+/**
  * Formats candle data from API to the format required by TradingView
  */
 export function formatCandleData(candles) {
@@ -61,7 +167,7 @@ export function formatCandleData(candles) {
         high,
         low,
         close,
-        volume
+        volume // Keep volume data for tooltip display
       };
     })
     .filter(candle => candle !== null)
