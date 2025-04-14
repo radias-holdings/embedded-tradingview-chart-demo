@@ -2,160 +2,94 @@
  * API Service for handling candle data requests and WebSocket connections
  */
 export class ApiService {
-  constructor(authService, options = {}) {
+  constructor(authService, config) {
     this.authService = authService;
-    this.apiBaseUrl = options.apiBaseUrl || 'https://api.embedded.eightcap.com';
-    this.wsBaseUrl = options.wsBaseUrl || 'wss://quote.embedded.eightcap.com';
+    this.apiBaseUrl = config.apiBaseUrl;
+    this.wsBaseUrl = config.wsBaseUrl;
+    this.config = config;
+    
+    // Cache management
+    this.cache = new Map();
+    this.pendingRequests = new Map();
     
     // WebSocket state
     this.ws = null;
-    this.wsConnectionPromise = null;
-    this.wsReconnectAttempts = 0;
+    this.wsConnecting = false;
+    this.subscriptions = new Map();
+    this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
-    this.reconnectDelay = 2000; // Start with 2 seconds
-    this.wsSubscriptions = new Map(); // Map of subscription key -> Set of callbacks
-    
-    // Cache management
-    this.instrumentCache = new Map(); // Cache for instrument data
-    this.historicalDataCache = new Map(); // Cache for historical data
-    this.pendingRequests = new Map(); // Cache for in-flight requests
-    
-    // Initialize token
-    this.bearerToken = null;
-    this._initializeToken();
   }
 
   /**
-   * Initialize token and set up refresh mechanism
-   * @private
-   */
-  async _initializeToken() {
-    try {
-      // Get initial token
-      const token = await this.authService.getToken();
-      this.bearerToken = token;
-      console.log('Authentication token initialized');
-    } catch (error) {
-      console.error('Failed to initialize token:', error);
-      throw error; // Rethrow to make initialization failures more visible
-    }
-  }
-
-  /**
-   * Generate headers for API requests
-   * @returns {Object} Headers object with authorization
+   * Get authentication headers for API requests
    */
   async getHeaders() {
-    try {
-      // Ensure we have a valid token
-      if (!this.bearerToken) {
-        this.bearerToken = await this.authService.getToken();
-      }
-      
-      return {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.bearerToken}`
-      };
-    } catch (error) {
-      console.error('Error getting headers:', error);
-      throw error;
-    }
+    const token = await this.authService.getToken();
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    };
   }
 
   /**
-   * Generate cache key for various data types
-   * @param {string} prefix - Cache type prefix
-   * @param {Object} params - Parameters to include in the key
-   * @returns {string} Cache key
+   * Fetch data with caching and request deduplication
    */
-  generateCacheKey(prefix, params) {
-    return `${prefix}:${JSON.stringify(params)}`;
-  }
-
-  /**
-   * Fetch data from API with caching and deduplication
-   * @param {string} endpoint - API endpoint
-   * @param {Object} params - Query parameters
-   * @param {string} cachePrefix - Cache prefix for this request type
-   * @param {function} transformData - Function to transform response data
-   * @returns {Promise<any>} API response data
-   */
-  async fetchWithCache(endpoint, params, cachePrefix, transformData = data => data) {
-    const cacheKey = this.generateCacheKey(cachePrefix, params);
-    const requestKey = this.generateCacheKey(endpoint, params);
-    
-    console.log(`API request: ${endpoint}`, params);
-    
+  async fetchWithCache(endpoint, params, cacheKey) {
     // Check cache first
-    const cachedData = this.historicalDataCache.get(cacheKey);
-    if (cachedData) {
-      console.log(`Using cached data for ${cacheKey}`);
-      return cachedData;
+    if (this.cache.has(cacheKey)) {
+      return this.cache.get(cacheKey);
     }
     
-    // Check if identical request is already in flight
+    // Check for in-flight requests
+    const requestKey = `${endpoint}:${JSON.stringify(params)}`;
     if (this.pendingRequests.has(requestKey)) {
-      console.log(`Reusing in-flight request for ${requestKey}`);
       return this.pendingRequests.get(requestKey);
     }
     
-    // Build URL with parameters
+    // Build URL
     const url = new URL(`${this.apiBaseUrl}${endpoint}`);
+    
+    // Add referer param if available
+    if (this.config.referer && !params.referer) {
+      params.referer = this.config.referer;
+    }
+    
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
         url.searchParams.append(key, value.toString());
       }
     });
     
-    console.log(`Fetching data from: ${url.toString()}`);
-    
+    // Make request
     const requestPromise = (async () => {
       try {
         const headers = await this.getHeaders();
-        console.log('Request headers:', headers);
-        
-        const response = await fetch(url.toString(), {
-          method: 'GET',
-          headers
-        });
-        
-        console.log(`Response status: ${response.status}`);
+        const response = await fetch(url.toString(), { method: 'GET', headers });
         
         if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`API error (${response.status}):`, errorText);
           throw new Error(`API request failed: ${response.status} ${response.statusText}`);
         }
         
         const data = await response.json();
-        console.log(`Received data from API, type: ${typeof data}, length: ${Array.isArray(data) ? data.length : 'n/a'}`);
         
-        const transformedData = transformData(data);
-        
-        // Cache the result if it's not empty
-        if (transformedData && 
-           (Array.isArray(transformedData) ? transformedData.length > 0 : true)) {
-          console.log(`Caching data for ${cacheKey}`);
-          this.historicalDataCache.set(cacheKey, transformedData);
+        // Cache result if not empty
+        if (data && (Array.isArray(data) ? data.length > 0 : true)) {
+          this.cache.set(cacheKey, data);
           
-          // Limit cache size to prevent memory leaks
-          if (this.historicalDataCache.size > 100) {
-            const firstKey = this.historicalDataCache.keys().next().value;
-            this.historicalDataCache.delete(firstKey);
+          // Limit cache size
+          if (this.cache.size > 100) {
+            const firstKey = this.cache.keys().next().value;
+            this.cache.delete(firstKey);
           }
         }
         
-        return transformedData;
-      } catch (error) {
-        console.error(`Error fetching from ${endpoint}:`, error);
-        throw error;
+        return data;
       } finally {
-        // Clean up pending request regardless of success or failure
         this.pendingRequests.delete(requestKey);
       }
     })();
     
-    // Store promise for potential future identical requests
+    // Store promise for deduplication
     this.pendingRequests.set(requestKey, requestPromise);
     
     return requestPromise;
@@ -163,213 +97,197 @@ export class ApiService {
 
   /**
    * Fetch historical candle data
-   * @param {string} symbol - Instrument symbol
-   * @param {string} width - Candle width (e.g., '1m', '5m', '1d')
-   * @param {Object} options - Request options
-   * @returns {Promise<Array>} Array of candle data
    */
   async fetchCandles(symbol, width, options = {}) {
     const { limit, start, end } = options;
     
-    // Format dates for API if needed
-    const formattedStart = start ? new Date(start).toISOString() : undefined;
-    const formattedEnd = end ? new Date(end).toISOString() : undefined;
+    // Ensure timestamps are integers (no decimal places)
+    const formattedStart = start ? Math.floor(start) : undefined;
+    const formattedEnd = end ? Math.floor(end) : undefined;
     
     const params = {
       symbol,
       width,
       ...(limit ? { limit } : {}),
       ...(formattedStart ? { start: formattedStart } : {}),
-      ...(formattedEnd ? { end: formattedEnd } : {})
+      ...(formattedEnd ? { end: formattedEnd } : {}),
+      referer: this.apiBaseUrl.config?.referer
     };
     
-    // Create a unique cache key that includes the time range
-    const cacheKey = `candles:${symbol}:${width}:${start || 'start'}:${end || 'end'}:${limit || 'nolimit'}`;
+    const cacheKey = `candles:${symbol}:${width}:${formattedStart || 'start'}:${formattedEnd || 'end'}:${limit || 'nolimit'}`;
     
-    return this.fetchWithCache(
-      '/candle', 
-      params, 
-      cacheKey
-    );
+    return this.fetchWithCache('/candle', params, cacheKey);
   }
 
   /**
    * Fetch instrument details
-   * @param {string} symbol - Instrument symbol
-   * @returns {Promise<Object>} Instrument details
    */
   async fetchInstrument(symbol) {
-    // Check instrument cache first
-    if (this.instrumentCache.has(symbol)) {
-      return this.instrumentCache.get(symbol);
+    const cacheKey = `instrument:${symbol}`;
+    
+    if (this.cache.has(cacheKey)) {
+      return this.cache.get(cacheKey);
     }
     
-    const requestKey = `/instrument/${symbol}`;
-    
-    // Check if identical request is already in flight
-    if (this.pendingRequests.has(requestKey)) {
-      return this.pendingRequests.get(requestKey);
-    }
-    
-    const url = `${this.apiBaseUrl}/instrument/${symbol}`;
-    
-    // Create request promise
-    const requestPromise = (async () => {
-      try {
-        const headers = await this.getHeaders();
-        console.log(`Fetching instrument data for ${symbol}`);
-        
-        const response = await fetch(url, {
-          method: 'GET',
-          headers
-        });
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`API error (${response.status}):`, errorText);
-          throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        console.log(`Received instrument data for ${symbol}`);
-        
-        // Cache the instrument data
-        this.instrumentCache.set(symbol, data);
-        
-        return data;
-      } catch (error) {
-        console.error(`Error fetching instrument data for ${symbol}:`, error);
-        throw error;
-      } finally {
-        // Remove from pending requests
-        this.pendingRequests.delete(requestKey);
+    try {
+      const headers = await this.getHeaders();
+      const response = await fetch(`${this.apiBaseUrl}/instrument/${symbol}`, {
+        method: 'GET',
+        headers
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
       }
-    })();
-    
-    // Store promise for potential future identical requests
-    this.pendingRequests.set(requestKey, requestPromise);
-    
-    return requestPromise;
+      
+      const data = await response.json();
+      this.cache.set(cacheKey, data);
+      
+      return data;
+    } catch (error) {
+      console.error(`Error fetching instrument data for ${symbol}:`, error);
+      throw error;
+    }
   }
 
   /**
    * Initialize WebSocket connection with authentication
-   * @returns {Promise<WebSocket>} WebSocket instance
    */
-  async initWebSocket() {
-    // If already connecting, return the existing promise
-    if (this.wsConnectionPromise) {
-      return this.wsConnectionPromise;
-    }
-    
-    // If already connected, return the existing connection
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+  async connectWebSocket() {
+    // Return existing connection if available
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return this.ws;
     }
     
-    // Ensure we have a token
-    if (!this.bearerToken) {
-      this.bearerToken = await this.authService.getToken();
+    // Prevent multiple simultaneous connection attempts
+    if (this.wsConnecting) {
+      return new Promise((resolve, reject) => {
+        const checkInterval = setInterval(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            clearInterval(checkInterval);
+            resolve(this.ws);
+          } else if (!this.wsConnecting) {
+            clearInterval(checkInterval);
+            reject(new Error('WebSocket connection failed'));
+          }
+        }, 100);
+      });
     }
     
-    this.wsConnectionPromise = (async () => {
-      try {
-        // Build the WebSocket URL with authentication token
-        const queryParams = new URLSearchParams();
-        queryParams.append('token', this.bearerToken);
-        
-        // Include initial subscriptions if any
-        const subscriptions = Array.from(this.wsSubscriptions.keys());
-        if (subscriptions.length > 0) {
-          queryParams.append('symbols', subscriptions.join(','));
-        }
-        
-        const wsUrl = `${this.wsBaseUrl}/candle?${queryParams.toString()}`;
-        console.log('Initializing WebSocket connection');
-        
-        // Create a promise that resolves when connection is established
-        const connectionPromise = new Promise((resolve, reject) => {
-          let socket;
-          try {
-            socket = new WebSocket(wsUrl);
-          } catch (error) {
-            console.error('Error creating WebSocket:', error);
-            reject(error);
-            return;
-          }
+    this.wsConnecting = true;
+    
+    try {
+      // Get token for authentication
+      const token = await this.authService.getToken();
+      console.log('Got token for WebSocket connection');
+      
+      // Build WebSocket URL with subscriptions and referer
+      const subscriptions = Array.from(this.subscriptions.keys());
+      const queryParams = new URLSearchParams();
+      
+      if (subscriptions.length > 0) {
+        queryParams.append('symbols', subscriptions.join(','));
+      }
+      
+      // Add referer parameter if available
+      if (this.config.referer) {
+        queryParams.append('referer', this.config.referer);
+      }
+      
+      const wsUrlWithParams = `${this.wsBaseUrl}/candle${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
+      console.log(`Connecting to WebSocket: ${wsUrlWithParams}`);
+      
+      return new Promise((resolve, reject) => {
+        try {
+          // Create WebSocket connection
+          const authHeader = `Bearer ${token}`;
+          console.log(`Using auth header: ${authHeader.substring(0, 20)}...`);
           
-          socket.onopen = () => {
-            console.log('WebSocket connection established');
-            // Reset reconnect attempts on successful connection
-            this.wsReconnectAttempts = 0;
-            this.reconnectDelay = 2000;
-            resolve(socket);
+          this.ws = new WebSocket(wsUrlWithParams);
+          
+          // Set up connection handler
+          this.ws.onopen = () => {
+            console.log('WebSocket connection opened');
+            
+            // Send authentication message as the first message after connection
+            const authMessage = JSON.stringify({ type: 'auth', token: token });
+            this.ws.send(authMessage);
+            console.log('Sent authentication message to WebSocket');
+            
+            this.reconnectAttempts = 0;
+            this.wsConnecting = false;
+            
+            // Re-subscribe to all active subscriptions
+            subscriptions.forEach(sub => {
+              this.ws.send(sub);
+              console.log(`Re-subscribed to ${sub}`);
+            });
+            
+            resolve(this.ws);
           };
           
-          socket.onmessage = (event) => {
+          this.ws.onmessage = (event) => {
+            // Handle ping messages
+            if (event.data === 'ping') {
+              this.ws.send('pong');
+              console.log('Received ping, sent pong');
+              return;
+            }
+            
             try {
               const data = JSON.parse(event.data);
-              this.processWebSocketData(data);
+              console.log('Received WebSocket message:', data);
+              this.handleWebSocketMessage(data);
             } catch (error) {
-              console.error('Error processing WebSocket message:', error);
+              console.error('Error processing WebSocket message:', error, 'Raw data:', event.data);
             }
           };
           
-          socket.onerror = (error) => {
+          this.ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            this.wsConnecting = false;
             reject(error);
           };
           
-          socket.onclose = (event) => {
-            console.log(`WebSocket connection closed: ${event.code} ${event.reason}`);
+          this.ws.onclose = (event) => {
+            console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
             this.ws = null;
+            this.wsConnecting = false;
             
-            // Check if we should attempt to reconnect
-            if (this.wsReconnectAttempts < this.maxReconnectAttempts) {
-              this.wsReconnectAttempts++;
-              // Exponential backoff for reconnect
-              const delay = Math.min(this.reconnectDelay * Math.pow(1.5, this.wsReconnectAttempts), 30000);
+            // Attempt reconnection
+            if (this.reconnectAttempts < this.maxReconnectAttempts) {
+              this.reconnectAttempts++;
+              const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
               
               console.log(`Will attempt to reconnect in ${delay}ms`);
               setTimeout(() => {
-                this.wsConnectionPromise = null;
-                this.initWebSocket();
+                this.connectWebSocket().catch(err => {
+                  console.error('WebSocket reconnection failed:', err);
+                });
               }, delay);
             }
           };
-          
-          this.ws = socket;
-        });
-        
-        await connectionPromise;
-        return this.ws;
-      } catch (error) {
-        console.error('Error establishing WebSocket connection:', error);
-        throw error;
-      } finally {
-        this.wsConnectionPromise = null;
-      }
-    })();
-    
-    return this.wsConnectionPromise;
+        } catch (error) {
+          this.wsConnecting = false;
+          reject(error);
+        }
+      });
+    } catch (error) {
+      this.wsConnecting = false;
+      throw error;
+    }
   }
 
   /**
-   * Process data received from WebSocket
-   * @param {Object} data - Candle data from WebSocket
+   * Handle data received from WebSocket
    */
-  processWebSocketData(data) {
-    if (!data || !data.symbol || !data.width) {
-      console.warn('Invalid WebSocket data format:', data);
-      return;
-    }
+  handleWebSocketMessage(data) {
+    if (!data || !data.symbol || !data.width) return;
     
     const key = `${data.symbol}@${data.width}`;
-    console.log(`Received WebSocket data for ${key}`);
     
-    // Call registered callbacks for this symbol and width
-    if (this.wsSubscriptions.has(key)) {
-      const callbacks = this.wsSubscriptions.get(key);
+    if (this.subscriptions.has(key)) {
+      const callbacks = this.subscriptions.get(key);
       callbacks.forEach(callback => {
         try {
           callback(data);
@@ -382,67 +300,53 @@ export class ApiService {
 
   /**
    * Subscribe to real-time candle updates
-   * @param {string} symbol - Instrument symbol
-   * @param {string} width - Candle width
-   * @param {Function} callback - Callback function for data updates
-   * @returns {Promise<void>}
    */
   async subscribeToCandles(symbol, width, callback) {
     const key = `${symbol}@${width}`;
     
-    // Initialize callback set if not exists
-    if (!this.wsSubscriptions.has(key)) {
-      this.wsSubscriptions.set(key, new Set());
+    // Initialize callback set if needed
+    if (!this.subscriptions.has(key)) {
+      this.subscriptions.set(key, new Set());
     }
     
-    // Add callback
-    this.wsSubscriptions.get(key).add(callback);
+    // Add callback to the set
+    this.subscriptions.get(key).add(callback);
     
-    // Initialize WebSocket if not already done
-    let socket;
+    // Ensure WebSocket is connected
     try {
-      socket = await this.initWebSocket();
+      const ws = await this.connectWebSocket();
+      
+      // Send subscription message
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(key);
+        console.log(`Subscribed to ${key}`);
+      }
     } catch (error) {
-      console.error('Failed to initialize WebSocket for subscription:', error);
-      return;
-    }
-    
-    // Send subscription message if socket is open
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(key);
-      console.log(`Subscribed to ${key}`);
+      console.error('Failed to subscribe to WebSocket:', error);
     }
   }
 
   /**
    * Unsubscribe from real-time candle updates
-   * @param {string} symbol - Instrument symbol
-   * @param {string} width - Candle width
-   * @param {Function} [callback] - Specific callback to remove (if undefined, remove all)
-   * @returns {Promise<void>}
    */
   async unsubscribeFromCandles(symbol, width, callback) {
     const key = `${symbol}@${width}`;
     
-    if (!this.wsSubscriptions.has(key)) {
-      return; // No subscriptions to this key
-    }
+    if (!this.subscriptions.has(key)) return;
     
     if (callback) {
       // Remove specific callback
-      const callbacks = this.wsSubscriptions.get(key);
+      const callbacks = this.subscriptions.get(key);
       callbacks.delete(callback);
       
-      // If callbacks remain, don't send unsubscribe message
-      if (callbacks.size > 0) {
-        return;
-      }
+      // If callbacks remain, don't unsubscribe
+      if (callbacks.size > 0) return;
     }
     
     // Remove all callbacks for this key
-    this.wsSubscriptions.delete(key);
+    this.subscriptions.delete(key);
     
-    // Send unsubscribe message if WebSocket is open
+    // Send unsubscribe message if connected
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(`-${key}`);
       console.log(`Unsubscribed from ${key}`);
@@ -450,7 +354,7 @@ export class ApiService {
   }
 
   /**
-   * Close the WebSocket connection and clean up resources
+   * Clean up resources
    */
   cleanup() {
     if (this.ws) {
@@ -458,10 +362,9 @@ export class ApiService {
       this.ws = null;
     }
     
-    this.wsSubscriptions.clear();
+    this.subscriptions.clear();
     this.pendingRequests.clear();
-    this.historicalDataCache.clear();
-    this.instrumentCache.clear();
+    this.cache.clear();
   }
 }
 

@@ -1,21 +1,55 @@
 import { createChart } from 'lightweight-charts';
 import { 
   formatCandleData, 
-  calculateDataRange, 
   mergeCandles, 
-  isTimestampInRange,
-  calculateSubscriptionRange,
-  findNearestTradingDay
+  parseInterval,
+  calculateDataRange,
+  findNearestTradingDay,
+  calculateSubscriptionRange
 } from './utils';
 
 /**
- * Chart wrapper for TradingView Lightweight Charts integration
+ * Chart wrapper for TradingView Lightweight Charts
  */
 export class ChartComponent {
-  constructor(container, apiService, options = {}) {
+  constructor(container, apiService) {
     this.container = container;
     this.apiService = apiService;
-    this.options = {
+    
+    // Chart state
+    this.chart = null;
+    this.candleSeries = null;
+    this.volumeSeries = null;
+    this.symbol = null;
+    this.interval = '1d';
+    this.data = [];
+    this.instrumentData = null;
+    this.isLoading = false;
+    this.loadingPromise = null;
+    this.lastLoadedRange = null;
+    this.realtimeCallback = null;
+    this._volumeScale = 0.1; // Initial volume scale (small)
+    this._timeRangeChangeTimeout = null;
+    
+    // Data cache
+    this.dataCache = new Map();
+    
+    this.init();
+  }
+
+  /**
+   * Initialize the chart
+   */
+  init() {
+    // Get container dimensions
+    const { width, height } = this.container.getBoundingClientRect();
+    const containerWidth = width || 800;
+    const containerHeight = height || 500;
+    
+    // Create chart
+    this.chart = createChart(this.container, {
+      width: containerWidth,
+      height: containerHeight,
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
@@ -36,107 +70,42 @@ export class ChartComponent {
       },
       crosshair: {
         mode: 1,
+      }
+    });
+    
+    // Add candlestick series
+    this.candleSeries = this.chart.addCandlestickSeries({
+      upColor: '#26a69a',
+      downColor: '#ef5350',
+      borderVisible: false,
+      wickUpColor: '#26a69a',
+      wickDownColor: '#ef5350',
+    });
+    
+    // Add volume series - using a separate scale and very small size
+    this.volumeSeries = this.chart.addHistogramSeries({
+      color: '#26a69a',
+      priceFormat: {
+        type: 'volume',
       },
-      ...options
-    };
+      priceScaleId: 'volume', // Use a separate price scale
+      // Make volume much smaller to avoid hiding candles
+      scaleMargins: {
+        top: 0.9, // Push volume to the very bottom
+        bottom: 0.02,
+      },
+      // Reduce visibility further
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
     
-    // Chart state
-    this.symbol = null;
-    this.interval = '1d';
-    this.data = [];
-    this.chart = null;
-    this.candleSeries = null;
-    this.volumeSeries = null;
-    this.isLoading = false;
-    this.loadingPromise = null;
-    this.lastLoadedRange = null;
-    this.realtimeCallback = null;
-    this.instrumentData = null;
-    this._volumeScale = 1;
-    this._timeRangeChangeTimeout = null;
-    
-    // Cache for previously loaded symbols and intervals
-    this._symbolCache = new Map();
-    
-    // Create the chart instance
-    this.init();
+    // Add event listeners
+    window.addEventListener('resize', this.handleResize.bind(this));
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(
+      this.handleTimeRangeChange.bind(this)
+    );
   }
-  
-  /**
-   * Initialize the chart
-   */
-  init() {
-    console.log('Initializing chart...', this.container.id);
-    
-    if (!this.container) {
-      console.error('Chart container is null or undefined');
-      return;
-    }
-    
-    const { width, height } = this.container.getBoundingClientRect();
-    console.log('Container dimensions:', { width, height });
-    
-    if (width === 0 || height === 0) {
-      console.error('Chart container has zero width or height');
-      // Force minimum dimensions to prevent chart creation failure
-      this.container.style.width = '100%';
-      this.container.style.height = '500px';
-      // Get updated dimensions
-      const updatedDimensions = this.container.getBoundingClientRect();
-      console.log('Updated container dimensions:', updatedDimensions);
-    }
-    
-    try {
-      // Create the chart with the container's dimensions
-      const containerWidth = this.container.clientWidth || 800;
-      const containerHeight = this.container.clientHeight || 500;
-      
-      this.chart = createChart(this.container, {
-        width: containerWidth,
-        height: containerHeight,
-        ...this.options
-      });
-      
-      console.log('Chart created successfully');
-      
-      // Add the candlestick series
-      this.candleSeries = this.chart.addCandlestickSeries({
-        upColor: '#26a69a',
-        downColor: '#ef5350',
-        borderVisible: false,
-        wickUpColor: '#26a69a',
-        wickDownColor: '#ef5350',
-      });
-      
-      console.log('Candlestick series added');
-      
-      // Add the volume series
-      this.volumeSeries = this.chart.addHistogramSeries({
-        color: '#26a69a',
-        priceFormat: {
-          type: 'volume',
-        },
-        priceScaleId: '', // Use a separate price scale
-        // Position volume at the bottom
-        scaleMargins: {
-          top: 0.85,
-          bottom: 0,
-        },
-      });
-      
-      console.log('Volume series added');
-      
-      // Add event listeners
-      window.addEventListener('resize', this.handleResize.bind(this));
-      
-      // Handle time scale changes
-      this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleTimeRangeChange.bind(this));
-    } catch (error) {
-      console.error('Error initializing chart:', error);
-      throw error; // Re-throw to allow error handling by parent component
-    }
-  }
-  
+
   /**
    * Handle window resize events
    */
@@ -146,15 +115,12 @@ export class ChartComponent {
     const { width, height } = this.container.getBoundingClientRect();
     this.chart.resize(width, height);
   }
-  
+
   /**
    * Handle time range changes (viewport navigation)
-   * @param {Object} logicalRange - Visible logical range
    */
   async handleTimeRangeChange(logicalRange) {
-    if (!this.symbol || !this.interval || !logicalRange) {
-      return;
-    }
+    if (!this.symbol || !this.interval || !logicalRange || this.isLoading) return;
     
     // Debounce rapid viewport changes
     if (this._timeRangeChangeTimeout) {
@@ -163,40 +129,54 @@ export class ChartComponent {
     
     this._timeRangeChangeTimeout = setTimeout(async () => {
       try {
-        // Convert logical range to time range
+        // Get visible range
         const timeScale = this.chart.timeScale();
         const visibleRange = timeScale.getVisibleRange();
         
-        if (!visibleRange) {
-          return;
-        }
+        if (!visibleRange) return;
         
         const { from, to } = visibleRange;
         const fromMs = from * 1000;
         const toMs = to * 1000;
         
         // Check if we need to load more data
+        let needsLoading = false;
+        let loadStart = fromMs;
+        let loadEnd = toMs;
+        
         if (this.lastLoadedRange) {
           const { start, end } = this.lastLoadedRange;
+          const buffer = (end - start) * 0.2; // 20% buffer
           
-          // If the visible range is within the loaded range with buffer, no need to load more
-          const buffer = (end - start) * 0.2;
-          if (fromMs >= (start + buffer) && toMs <= (end - buffer)) {
-            return;
+          if (fromMs < (start + buffer)) {
+            // Need to load earlier data
+            needsLoading = true;
+            loadEnd = start;
+            loadStart = fromMs - (end - start) * 0.5; // Load 50% more history
+          } else if (toMs > (end - buffer)) {
+            // Need to load later data
+            needsLoading = true;
+            loadStart = end;
+            loadEnd = toMs + (toMs - fromMs) * 0.5; // Load 50% more future
           }
+        } else {
+          // No data loaded yet
+          needsLoading = true;
         }
         
-        // Calculate the optimal data range
-        const range = calculateDataRange(
-          this.interval,
-          this.container.clientWidth,
-          fromMs,
-          toMs
-        );
+        if (needsLoading) {
+          // Calculate optimal data range
+          const range = calculateDataRange(
+            this.interval,
+            this.container.clientWidth,
+            loadStart,
+            loadEnd
+          );
+          
+          await this.loadDataForRange(range.start, range.end, range.limit);
+        }
         
-        await this.loadDataForRange(range.start, range.end, range.limit);
-        
-        // Update subscription range for WebSocket
+        // Update WebSocket subscription
         if (visibleRange) {
           await this.updateRealtimeSubscription(visibleRange);
         }
@@ -205,202 +185,150 @@ export class ChartComponent {
       }
     }, 300); // 300ms debounce
   }
-  
+
   /**
-   * Set loading state for the chart
-   * @param {boolean} isLoading - Whether chart is loading
+   * Set loading state
    */
   setLoadingState(isLoading) {
-    if (!this.chart) return;
+    this.isLoading = isLoading;
     
-    this.chart.applyOptions({
-      crosshair: {
-        mode: isLoading ? 0 : 1,
-        vertLine: {
-          visible: !isLoading,
-        },
-        horzLine: {
-          visible: !isLoading,
+    // Update chart UI based on loading state
+    if (this.chart) {
+      this.chart.applyOptions({
+        crosshair: {
+          mode: isLoading ? 0 : 1,
+          vertLine: { visible: !isLoading },
+          horzLine: { visible: !isLoading }
         }
-      }
-    });
+      });
+    }
   }
-  
+
   /**
    * Load data for a specific time range
-   * @param {number} start - Start timestamp
-   * @param {number} end - End timestamp
-   * @param {number} limit - Maximum number of candles
    */
   async loadDataForRange(start, end, limit) {
-    console.log(`Loading data range: ${new Date(start).toISOString()} to ${new Date(end).toISOString()}, limit: ${limit}`);
-    
-    // If already loading, return the existing promise to prevent duplicate requests
+    // If already loading, return the existing promise
     if (this.loadingPromise) {
-      console.log('Already loading data, waiting for completion...');
       return this.loadingPromise;
     }
     
-    this.isLoading = true;
     this.setLoadingState(true);
     
-    // Create a new loading promise
     this.loadingPromise = (async () => {
       try {
-        // Fetch instrument data if not already available
+        // Fetch instrument data if not available
         if (!this.instrumentData) {
-          console.log(`Fetching instrument data for ${this.symbol}`);
-          this.instrumentData = await this.apiService.fetchInstrument(this.symbol);
-          console.log('Instrument data:', this.instrumentData);
+          try {
+            this.instrumentData = await this.apiService.fetchInstrument(this.symbol);
+          } catch (error) {
+            console.warn('Could not fetch instrument data:', error.message);
+            // Continue without instrument data
+          }
         }
         
         // For instruments with limited trading hours, adjust the start time
         let adjustedStart = start;
         if (this.instrumentData && this.instrumentData.category !== 'Crypto') {
           adjustedStart = findNearestTradingDay(this.instrumentData, adjustedStart);
-          console.log(`Adjusted start time to nearest trading day: ${new Date(adjustedStart).toISOString()}`);
         }
         
-        console.log(`Fetching candles for ${this.symbol}:${this.interval}`);
-        const newData = await this.apiService.fetchCandles(this.symbol, this.interval, {
+        // Fetch candles
+        const candles = await this.apiService.fetchCandles(this.symbol, this.interval, {
           start: adjustedStart,
           end,
           limit
         });
         
-        console.log(`Received ${newData?.length || 0} candles from API`);
-        
-        // Only update chart if we got new data
-        if (newData && newData.length > 0) {
-          const formattedData = formatCandleData(newData);
-          console.log(`Formatted ${formattedData.length} candles for chart`);
-          
-          const previousDataLength = this.data.length;
-          this.data = mergeCandles(this.data, formattedData);
-          console.log(`Data after merge: ${previousDataLength} -> ${this.data.length} candles`);
+        if (candles && candles.length > 0) {
+          const formattedCandles = formatCandleData(candles);
+          this.data = mergeCandles(this.data, formattedCandles);
           
           this.updateSeries();
           
-          // Save the expanded loaded range
+          // Update loaded range
           this.lastLoadedRange = {
             start: Math.min(adjustedStart, this.lastLoadedRange?.start || Infinity),
             end: Math.max(end, this.lastLoadedRange?.end || 0)
           };
-          console.log(`Updated loaded range: ${new Date(this.lastLoadedRange.start).toISOString()} to ${new Date(this.lastLoadedRange.end).toISOString()}`);
-        } else {
-          console.warn('No data received from API or empty data set');
         }
         
         return this.data;
       } catch (error) {
-        console.error('Error loading data for range:', error);
-        throw error;
+        console.error('Error loading data:', error);
+        // Return existing data to keep chart working
+        return this.data;
       } finally {
         this.setLoadingState(false);
-        this.isLoading = false;
         this.loadingPromise = null;
       }
     })();
     
     return this.loadingPromise;
   }
-  
+
   /**
-   * Update the series with current data
+   * Update chart series with current data
    */
   updateSeries() {
-    console.log('Updating series with data length:', this.data?.length);
+    if (!this.data || !this.candleSeries || !this.volumeSeries || this.data.length === 0) return;
     
-    if (!this.data || !this.candleSeries || !this.volumeSeries) {
-      console.warn('Cannot update series: missing data or series objects');
-      return;
-    }
+    // Update candlestick series
+    this.candleSeries.setData(this.data);
     
-    if (this.data.length === 0) {
-      console.warn('No data to display in chart');
-      return;
-    }
+    // Make volume extremely small to avoid overlapping with candles
+    const maxVolume = Math.max(...this.data.map(item => item.volume || 0), 1);
     
-    try {
-      if (this.data.length > 0) {
-        console.log('Sample data point:', this.data[0]);
-      }
-      
-      // Set the candlestick data
-      this.candleSeries.setData(this.data);
-      console.log('Candlestick series updated');
-      
-      // Calculate volume scale to prevent overlapping with candles
-      const maxVolume = Math.max(...this.data.map(item => item.volume || 0), 1);
-      console.log('Max volume:', maxVolume);
-      
-      // Calculate an appropriate scale for volume display
-      let volumeScale = 1;
-      if (maxVolume > 100000) {
-        volumeScale = 0.05;
-      } else if (maxVolume > 10000) {
-        volumeScale = 0.1;
-      } else if (maxVolume > 1000) {
-        volumeScale = 0.2;
-      } else if (maxVolume > 100) {
-        volumeScale = 0.4;
-      } else {
-        volumeScale = 0.8;
-      }
-      
-      // Store volume scale for real-time updates
-      this._volumeScale = volumeScale;
-      
-      // Update volume series with better color contrast
-      const volumeData = this.data.map(item => ({
-        time: item.time,
-        value: (item.volume || 0) * volumeScale, // Scale the volume
-        // Color based on candle direction
-        color: item.close >= item.open 
-          ? 'rgba(38, 166, 154, 0.7)' // Green for up
-          : 'rgba(239, 83, 80, 0.7)'  // Red for down
-      }));
-      
-      this.volumeSeries.setData(volumeData);
-      console.log('Volume series updated');
-      
-      // Ensure content is visible by fitting or restoring the view
-      this.chart.timeScale().fitContent();
-    } catch (error) {
-      console.error('Error updating chart series:', error);
-    }
+    // Use an extremely small scale - 0.001 means volume is at most 0.1% of the price range
+    let volumeScale = 0.001;
+    
+    // Further reduce scale for larger volumes
+    if (maxVolume > 1000000) volumeScale = 0.0001;
+    else if (maxVolume > 100000) volumeScale = 0.0005;
+    else if (maxVolume > 10000) volumeScale = 0.001;
+    else if (maxVolume > 1000) volumeScale = 0.002;
+    
+    // Store scale for realtime updates
+    this._volumeScale = volumeScale;
+    
+    // Update volume series with scaled values and colors
+    const volumeData = this.data.map(item => ({
+      time: item.time,
+      value: (item.volume || 0) * volumeScale,
+      color: item.close >= item.open 
+        ? 'rgba(38, 166, 154, 0.5)' // Green with transparency
+        : 'rgba(239, 83, 80, 0.5)'  // Red with transparency
+    }));
+    
+    this.volumeSeries.setData(volumeData);
   }
-  
+
   /**
-   * Update the realtime subscription based on visible range
-   * @param {Object} visibleRange - Visible time range
+   * Update realtime subscription based on visible range
    */
   async updateRealtimeSubscription(visibleRange) {
-    if (!this.symbol || !this.interval) {
-      return;
-    }
+    if (!this.symbol || !this.interval) return;
     
-    const subscriptionRange = calculateSubscriptionRange(this.interval, visibleRange);
+    // Calculate subscription range
+    const subRange = calculateSubscriptionRange(this.interval, visibleRange);
     
+    // Unsubscribe from previous
     if (this.realtimeCallback) {
-      await this.apiService.unsubscribeFromCandles(this.symbol, this.interval, this.realtimeCallback);
+      await this.apiService.unsubscribeFromCandles(
+        this.symbol, 
+        this.interval, 
+        this.realtimeCallback
+      );
       this.realtimeCallback = null;
     }
     
-    this.realtimeCallback = this.createRealtimeCallback(subscriptionRange);
-    
-    await this.apiService.subscribeToCandles(this.symbol, this.interval, this.realtimeCallback);
-  }
-  
-  /**
-   * Create callback function for real-time updates
-   * @param {Object} subscriptionRange - Range to check for updates
-   * @returns {Function} Callback function
-   */
-  createRealtimeCallback(subscriptionRange) {
-    return (candle) => {
-      const formattedCandle = {
-        time: Math.floor(candle.timestamp / 1000), // Convert to seconds for Lightweight Charts
+    // Create new callback for realtime updates
+    this.realtimeCallback = (candle) => {
+      // Convert to chart format
+      const timestamp = Math.floor(candle.timestamp / 1000);
+      
+      const candleData = {
+        time: timestamp,
         open: candle.open,
         high: candle.high,
         low: candle.low,
@@ -408,187 +336,131 @@ export class ChartComponent {
         volume: candle.volume || 0
       };
       
-      // Update or add the candle to our data
-      const existingIndex = this.data.findIndex(c => c.time === formattedCandle.time);
+      // Update or add to data array
+      const index = this.data.findIndex(c => c.time === timestamp);
       
-      if (existingIndex >= 0) {
-        // Update existing candle
-        this.data[existingIndex] = formattedCandle;
+      if (index >= 0) {
+        this.data[index] = candleData;
       } else {
-        // Add new candle
-        this.data.push(formattedCandle);
-        // Sort data by time
+        this.data.push(candleData);
         this.data.sort((a, b) => a.time - b.time);
       }
       
-      // Only update the UI if the candle is in the visible range
-      if (isTimestampInRange(formattedCandle.time, subscriptionRange.from, subscriptionRange.to)) {
-        this.candleSeries.update(formattedCandle);
-        
-        this.volumeSeries.update({
-          time: formattedCandle.time,
-          value: formattedCandle.volume * this._volumeScale,
-          color: formattedCandle.close >= formattedCandle.open 
-            ? 'rgba(38, 166, 154, 0.7)' 
-            : 'rgba(239, 83, 80, 0.7)'
-        });
-      }
+      // Update chart
+      this.candleSeries.update(candleData);
       
-      // Update loaded range to include this candle
+      this.volumeSeries.update({
+        time: timestamp,
+        value: candleData.volume * this._volumeScale,
+        color: candleData.close >= candleData.open 
+          ? 'rgba(38, 166, 154, 0.5)' 
+          : 'rgba(239, 83, 80, 0.5)'
+      });
+      
+      // Update loaded range
       if (this.lastLoadedRange) {
-        const candleTime = candle.timestamp;
-        this.lastLoadedRange = {
-          start: Math.min(this.lastLoadedRange.start, candleTime),
-          end: Math.max(this.lastLoadedRange.end, candleTime)
-        };
+        this.lastLoadedRange.end = Math.max(
+          this.lastLoadedRange.end, 
+          candle.timestamp
+        );
       }
     };
-  }
-  
-  /**
-   * Generate a cache key for symbol and interval
-   * @param {string} symbol - Instrument symbol
-   * @param {string} interval - Candle interval
-   * @returns {string} Cache key
-   */
-  _getCacheKey(symbol, interval) {
-    return `${symbol}:${interval}`;
+    
+    // Subscribe to updates
+    await this.apiService.subscribeToCandles(
+      this.symbol, 
+      this.interval, 
+      this.realtimeCallback
+    );
   }
 
   /**
-   * Load initial data and set up chart for a symbol and interval
-   * @param {string} symbol - Instrument symbol
-   * @param {string} interval - Candle interval
+   * Load symbol and interval
    */
   async loadSymbol(symbol, interval) {
-    // If already loading the same symbol and interval, return
-    if (this.symbol === symbol && this.interval === interval && this.loadingPromise) {
-      console.log(`Already loading ${symbol}:${interval}, waiting for completion...`);
-      return this.loadingPromise;
+    if (this.symbol === symbol && this.interval === interval && this.isLoading) {
+      return;
     }
     
-    console.log(`Loading symbol ${symbol} with interval ${interval}`);
+    this.setLoadingState(true);
     
     try {
-      this.isLoading = true;
-      this.setLoadingState(true);
-      
-      // Unsubscribe from previous symbol/interval
+      // Unsubscribe from previous
       if (this.symbol && this.interval && this.realtimeCallback) {
-        await this.apiService.unsubscribeFromCandles(this.symbol, this.interval, this.realtimeCallback);
+        await this.apiService.unsubscribeFromCandles(
+          this.symbol, 
+          this.interval, 
+          this.realtimeCallback
+        );
         this.realtimeCallback = null;
       }
       
-      // Before changing symbol/interval, cache current state
-      if (this.symbol && this.interval && this.data.length > 0) {
-        const currentCacheKey = this._getCacheKey(this.symbol, this.interval);
-        this._symbolCache.set(currentCacheKey, {
+      // Cache current data if any
+      const currentKey = this.symbol && this.interval 
+        ? `${this.symbol}:${this.interval}` 
+        : null;
+        
+      if (currentKey && this.data.length > 0) {
+        this.dataCache.set(currentKey, {
           data: [...this.data],
-          range: this.lastLoadedRange ? { ...this.lastLoadedRange } : null,
-          instrument: this.instrumentData,
-          timeRange: this.chart.timeScale().getVisibleRange()
+          range: this.lastLoadedRange ? {...this.lastLoadedRange} : null,
+          instrumentData: this.instrumentData
         });
       }
       
+      // Set new symbol/interval
       this.symbol = symbol;
       this.interval = interval;
       
-      const cacheKey = this._getCacheKey(symbol, interval);
-      const cachedData = this._symbolCache.get(cacheKey);
+      // Check cache for new symbol/interval
+      const newKey = `${symbol}:${interval}`;
+      const cachedData = this.dataCache.get(newKey);
       
       if (cachedData) {
         // Use cached data
-        console.log(`Using cached data for ${cacheKey}`);
         this.data = [...cachedData.data];
-        this.lastLoadedRange = cachedData.range ? { ...cachedData.range } : null;
-        this.instrumentData = cachedData.instrument;
-        
+        this.lastLoadedRange = cachedData.range ? {...cachedData.range} : null;
+        this.instrumentData = cachedData.instrumentData;
         this.updateSeries();
-        
-        // Set the time scale to match the cached view
-        if (cachedData.timeRange) {
-          this.chart.timeScale().setVisibleRange(cachedData.timeRange);
-        } else {
-          this.chart.timeScale().fitContent();
-        }
       } else {
-        // Fresh load
-        console.log(`Fresh load for ${symbol}:${interval}`);
+        // Fresh load - reset data
         this.data = [];
         this.lastLoadedRange = null;
+        this.instrumentData = null;
         
-        try {
-          this.instrumentData = await this.apiService.fetchInstrument(symbol);
-          console.log('Fetched instrument data:', this.instrumentData);
-        } catch (error) {
-          console.error(`Error fetching instrument data for ${symbol}:`, error);
-          // Continue with loading candles even if instrument data fails
-        }
-        
-        // Calculate optimal timeframe based on interval
+        // Calculate optimal range based on interval
         const end = Date.now();
         let start, limit;
         
         switch (interval) {
-          case '1m':  
-            start = end - (12 * 60 * 60 * 1000); // 12 hours
-            limit = 720;
-            break;
-          case '5m':  
-            start = end - (24 * 60 * 60 * 1000); // 1 day
-            limit = 288;
-            break;
-          case '15m': 
-            start = end - (3 * 24 * 60 * 60 * 1000); // 3 days
-            limit = 288;
-            break;
-          case '30m': 
-            start = end - (7 * 24 * 60 * 60 * 1000); // 1 week
-            limit = 336;
-            break;
-          case '1h':  
-            start = end - (14 * 24 * 60 * 60 * 1000); // 2 weeks
-            limit = 336;
-            break;
-          case '2h':
-            start = end - (30 * 24 * 60 * 60 * 1000); // 1 month
-            limit = 360;
-            break;
-          case '4h':  
-            start = end - (30 * 24 * 60 * 60 * 1000); // 1 month
-            limit = 180;
-            break;
-          case '12h':
-            start = end - (90 * 24 * 60 * 60 * 1000); // 3 months
-            limit = 180;
-            break;
-          case '1d':  
-            start = end - (365 * 24 * 60 * 60 * 1000); // 1 year
-            limit = 365;
-            break;
-          case '1w':  
-            start = end - (3 * 365 * 24 * 60 * 60 * 1000); // 3 years
-            limit = 156;
-            break;
-          case '1mo':
-            start = end - (5 * 365 * 24 * 60 * 60 * 1000); // 5 years
-            limit = 60;
-            break;
-          default:    
-            start = end - (30 * 24 * 60 * 60 * 1000); // Default 1 month
-            limit = 1000;
+          case '1m': start = end - (12 * 60 * 60 * 1000); limit = 720; break;
+          case '5m': start = end - (24 * 60 * 60 * 1000); limit = 288; break;
+          case '15m': start = end - (3 * 24 * 60 * 60 * 1000); limit = 288; break;
+          case '30m': start = end - (7 * 24 * 60 * 60 * 1000); limit = 336; break;
+          case '1h': start = end - (14 * 24 * 60 * 60 * 1000); limit = 336; break;
+          case '2h': start = end - (30 * 24 * 60 * 60 * 1000); limit = 360; break;
+          case '4h': start = end - (30 * 24 * 60 * 60 * 1000); limit = 180; break;
+          case '12h': start = end - (90 * 24 * 60 * 60 * 1000); limit = 180; break;
+          case '1d': start = end - (365 * 24 * 60 * 60 * 1000); limit = 365; break;
+          case '1w': start = end - (3 * 365 * 24 * 60 * 60 * 1000); limit = 156; break;
+          case '1mo': start = end - (5 * 365 * 24 * 60 * 60 * 1000); limit = 60; break;
+          default: start = end - (30 * 24 * 60 * 60 * 1000); limit = 1000;
         }
         
-        // For non-crypto instruments, adjust the start time
-        if (this.instrumentData && this.instrumentData.category !== 'Crypto') {
-          start = findNearestTradingDay(this.instrumentData, start);
+        // Fetch instrument data and initial candles
+        try {
+          this.instrumentData = await this.apiService.fetchInstrument(symbol);
+          
+          // Adjust start time for non-crypto instruments
+          if (this.instrumentData && this.instrumentData.category !== 'Crypto') {
+            start = findNearestTradingDay(this.instrumentData, start);
+          }
+        } catch (error) {
+          console.warn('Could not fetch instrument data:', error.message);
+          // Continue without instrument data
         }
         
-        // Fetch initial candles
         await this.loadDataForRange(start, end, limit);
-        
-        // Fit content to view
-        this.chart.timeScale().fitContent();
       }
       
       // Set up realtime subscription
@@ -597,57 +469,56 @@ export class ChartComponent {
         await this.updateRealtimeSubscription(visibleRange);
       }
       
+      // Fit content to view
+      this.chart.timeScale().fitContent();
+      
       return this.data;
     } catch (error) {
       console.error(`Error loading symbol ${symbol} with interval ${interval}:`, error);
       throw error;
     } finally {
       this.setLoadingState(false);
-      this.isLoading = false;
     }
   }
-  
+
   /**
-   * Change the interval for the current symbol
-   * @param {string} interval - New interval
+   * Change interval for current symbol
    */
   async changeInterval(interval) {
-    if (this.interval === interval || !this.symbol) {
-      return;
-    }
+    if (this.interval === interval || !this.symbol) return;
     
-    try {
-      return await this.loadSymbol(this.symbol, interval);
-    } catch (error) {
-      console.error(`Error changing interval to ${interval}:`, error);
-      throw error;
-    }
+    return this.loadSymbol(this.symbol, interval);
   }
-  
+
   /**
-   * Clean up chart resources
+   * Clean up resources
    */
   async destroy() {
-    // Clear any pending timeouts
+    // Clear timeouts
     if (this._timeRangeChangeTimeout) {
       clearTimeout(this._timeRangeChangeTimeout);
-      this._timeRangeChangeTimeout = null;
     }
     
-    // Unsubscribe from realtime updates
+    // Unsubscribe from WebSocket
     if (this.symbol && this.interval && this.realtimeCallback) {
-      await this.apiService.unsubscribeFromCandles(this.symbol, this.interval, this.realtimeCallback);
-      this.realtimeCallback = null;
+      await this.apiService.unsubscribeFromCandles(
+        this.symbol, 
+        this.interval, 
+        this.realtimeCallback
+      );
     }
     
+    // Remove event listeners
     window.removeEventListener('resize', this.handleResize.bind(this));
     
-    this._symbolCache.clear();
-    
+    // Clear chart
     if (this.chart) {
       this.chart.remove();
       this.chart = null;
     }
+    
+    // Clear cache
+    this.dataCache.clear();
   }
 }
 

@@ -1,12 +1,14 @@
+import { loadConfig } from './config';
+import { AuthService } from './auth';
 import { ApiService } from './api';
 import { ChartComponent } from './chart';
-import { AuthService } from './auth';
 
 /**
- * Application singleton to manage app lifecycle
+ * Main application class
  */
 class TradingViewApp {
   constructor() {
+    this.config = loadConfig();
     this.authService = null;
     this.apiService = null;
     this.chart = null;
@@ -14,12 +16,9 @@ class TradingViewApp {
   }
 
   /**
-   * Show error message to the user
-   * @param {string} title - Error title
-   * @param {string} message - Error message
+   * Show error message
    */
   showError(title, message) {
-    // Remove any existing error
     const existingError = document.getElementById('error-container');
     if (existingError) {
       document.body.removeChild(existingError);
@@ -33,7 +32,9 @@ class TradingViewApp {
       <div class="error-content">
         <h3>${title}</h3>
         <p>${message}</p>
-        <button id="error-close">Dismiss</button>
+        <div class="error-buttons">
+          <button id="error-close">Dismiss</button>
+        </div>
       </div>
     `;
     
@@ -46,8 +47,6 @@ class TradingViewApp {
 
   /**
    * Show loading indicator
-   * @param {string} message - Loading message
-   * @returns {HTMLElement} Loading indicator element
    */
   showLoading(message = 'Loading...') {
     this.hideLoading();
@@ -72,65 +71,26 @@ class TradingViewApp {
   }
   
   /**
-   * Set the active interval button
-   * @param {NodeList} buttons - Interval buttons
-   * @param {string} interval - Active interval
-   */
-  setActiveIntervalButton(buttons, interval) {
-    buttons.forEach(button => {
-      if (button.getAttribute('data-interval') === interval) {
-        button.classList.add('active');
-      } else {
-        button.classList.remove('active');
-      }
-    });
-  }
-  
-  /**
-   * Get the currently selected interval
-   * @param {NodeList} buttons - Interval buttons
-   * @returns {string} Current interval
-   */
-  getCurrentInterval(buttons) {
-    const activeButton = Array.from(buttons).find(button => button.classList.contains('active'));
-    return activeButton ? activeButton.getAttribute('data-interval') : '1d';
-  }
-  
-  /**
-   * Initialize the application services
+   * Initialize services
    */
   initServices() {
     try {
-      this.authService = new AuthService();
-      this.authService.loadCredentials();
-      
-      const config = {
-        apiBaseUrl: this.authService.credentials.apiBaseUrl,
-        wsBaseUrl: this.authService.credentials.wsBaseUrl
-      };
-      
-      this.apiService = new ApiService(this.authService, config);
-      
+      this.authService = new AuthService(this.config);
+      this.apiService = new ApiService(this.authService, this.config);
       return true;
     } catch (error) {
       console.error('Failed to initialize services:', error);
       
       if (error.message.includes('Missing required configuration')) {
-        this.showError('Environment Variables Missing', `
-          <p>Required environment variables are missing or invalid.</p>
+        this.showError('Configuration Missing', `
+          <p>Required environment variables are missing.</p>
           <p>Please ensure you have a .env file with the following variables:</p>
           <pre style="background: #f5f5f5; padding: 10px; overflow: auto; text-align: left;">
 CLIENT_ID=your_client_id_here
-CLIENT_SECRET=your_client_secret_here
-# Optional:
-# TOKEN_URL=https://eightcap-embedded.auth.ap-northeast-1.amazoncognito.com/oauth2/token
-# API_BASE_URL=https://api.embedded.eightcap.com
-# WS_BASE_URL=wss://quote.embedded.eightcap.com
-          </pre>
-          <p>Check the README.md for instructions on setting environment variables.</p>
+CLIENT_SECRET=your_client_secret_here</pre>
         `);
       } else {
-        this.showError('Initialization Failed', 'Failed to initialize application services. ' + error.message);
+        this.showError('Initialization Failed', `Failed to initialize services: ${error.message}`);
       }
       
       return false;
@@ -138,7 +98,7 @@ CLIENT_SECRET=your_client_secret_here
   }
   
   /**
-   * Initialize the chart component
+   * Initialize chart
    */
   initChart() {
     try {
@@ -153,13 +113,13 @@ CLIENT_SECRET=your_client_secret_here
       return true;
     } catch (error) {
       console.error('Failed to initialize chart:', error);
-      this.showError('Chart Initialization Failed', 'Failed to initialize the chart component. ' + error.message);
+      this.showError('Chart Initialization Failed', `Failed to initialize chart: ${error.message}`);
       return false;
     }
   }
   
   /**
-   * Set up event listeners for UI controls
+   * Set up UI event listeners
    */
   setupEventListeners() {
     try {
@@ -187,18 +147,25 @@ CLIENT_SECRET=your_client_secret_here
           
           const interval = button.getAttribute('data-interval');
           
+          // Update UI immediately
           this.setActiveIntervalButton(intervalButtons, interval);
+          
+          // Set button to loading state
+          button.classList.add('loading');
           
           try {
             await this.chart.changeInterval(interval);
           } catch (error) {
-            console.error(`Error changing interval to ${interval}:`, error);
-            this.showError('Interval Change Failed', `Failed to change to ${interval}. ` + error.message);
+            console.error(`Error changing interval:`, error);
+            this.showError('Interval Change Failed', `Failed to change interval: ${error.message}`);
+          } finally {
+            // Remove loading state
+            button.classList.remove('loading');
           }
         });
       });
       
-      // Listen for window beforeunload to clean up resources
+      // Cleanup on page unload
       window.addEventListener('beforeunload', () => {
         this.cleanup();
       });
@@ -206,56 +173,72 @@ CLIENT_SECRET=your_client_secret_here
       return true;
     } catch (error) {
       console.error('Failed to set up event listeners:', error);
-      this.showError('UI Setup Failed', 'Failed to set up UI controls. ' + error.message);
+      this.showError('UI Setup Failed', `Failed to setup UI: ${error.message}`);
       return false;
     }
   }
   
   /**
-   * Load chart with specified symbol and interval
-   * @param {string} symbol - Instrument symbol
-   * @param {string} interval - Candle interval
+   * Set active interval button
+   */
+  setActiveIntervalButton(buttons, interval) {
+    buttons.forEach(button => {
+      if (button.getAttribute('data-interval') === interval) {
+        button.classList.add('active');
+      } else {
+        button.classList.remove('active');
+      }
+    });
+  }
+  
+  /**
+   * Get current selected interval
+   */
+  getCurrentInterval(buttons) {
+    const activeButton = Array.from(buttons).find(button => button.classList.contains('active'));
+    return activeButton ? activeButton.getAttribute('data-interval') : '1d';
+  }
+  
+  /**
+   * Load chart with symbol and interval
    */
   async loadChart(symbol, interval) {
     try {
-      const loadingIndicator = this.showLoading(`Loading ${symbol}...`);
+      this.showLoading(`Loading ${symbol}...`);
       
       await this.chart.loadSymbol(symbol, interval);
       
-      const intervalButtons = document.querySelectorAll('.interval-selector button');
-      this.setActiveIntervalButton(intervalButtons, interval);
-      
       this.hideLoading();
     } catch (error) {
-      console.error(`Error loading symbol ${symbol}:`, error);
+      console.error(`Error loading symbol:`, error);
       this.hideLoading();
-      this.showError('Symbol Load Failed', `Failed to load ${symbol}. ` + error.message);
+      this.showError('Chart Loading Failed', `Failed to load chart data: ${error.message}`);
     }
   }
   
   /**
-   * Initialize the demo application
+   * Initialize the application
    */
   async init() {
     if (this.isInitialized) return;
     
     try {
-      const loadingIndicator = this.showLoading('Initializing...');
+      this.showLoading('Initializing...');
       
-      const servicesInitialized = this.initServices();
-      if (!servicesInitialized) {
+      // Initialize services
+      if (!this.initServices()) {
         this.hideLoading();
         return;
       }
       
-      const chartInitialized = this.initChart();
-      if (!chartInitialized) {
+      // Initialize chart
+      if (!this.initChart()) {
         this.hideLoading();
         return;
       }
       
-      const listenersSetup = this.setupEventListeners();
-      if (!listenersSetup) {
+      // Set up event listeners
+      if (!this.setupEventListeners()) {
         this.hideLoading();
         return;
       }
@@ -264,19 +247,16 @@ CLIENT_SECRET=your_client_secret_here
       const symbolSelect = document.getElementById('symbol-select');
       const intervalButtons = document.querySelectorAll('.interval-selector button');
       
-      // Initial symbol and interval
       const initialSymbol = symbolSelect.value;
-      const initialInterval = '1d'; // Default to daily view
+      const initialInterval = '1d'; // Default to daily
       
       try {
         await this.chart.loadSymbol(initialSymbol, initialInterval);
-        
         this.setActiveIntervalButton(intervalButtons, initialInterval);
-        
         this.isInitialized = true;
       } catch (error) {
         console.error('Failed to load initial chart:', error);
-        this.showError('Chart Loading Failed', 'Unable to load initial chart data. ' + error.message);
+        this.showError('Chart Loading Failed', `Failed to load initial chart: ${error.message}`);
       }
       
       this.hideLoading();
@@ -284,7 +264,7 @@ CLIENT_SECRET=your_client_secret_here
     } catch (error) {
       console.error('Failed to initialize application:', error);
       this.hideLoading();
-      this.showError('Initialization Failed', 'Failed to initialize application. ' + error.message);
+      this.showError('Initialization Failed', `Failed to initialize application: ${error.message}`);
     }
   }
   
@@ -311,9 +291,8 @@ CLIENT_SECRET=your_client_secret_here
   }
 }
 
-const app = new TradingViewApp();
-
-// Start the application once the DOM is loaded
+// Initialize application when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
+  const app = new TradingViewApp();
   app.init();
 });

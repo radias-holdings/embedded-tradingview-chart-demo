@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a JavaScript application that demonstrates using TradingView's Lightweight Charts library with our Candle REST and WebSocket APIs. This is primarily used for aiding Bitazza frontend development, but it may be useful for bootstrapping future clients who want to use TradingView (or a similar charting library).
+This is a JavaScript application that demonstrates using TradingView's Lightweight Charts library with our Candle REST and WebSocket APIs. This repo may be useful for bootstrapping future clients who want to use TradingView (or a similar charting library).
 
 ## Prerequisites
 
