@@ -6,6 +6,13 @@
 
 This is a JavaScript application that demonstrates using TradingView's Lightweight Charts library with our Candle REST and WebSocket APIs. This repo may be useful for bootstrapping future clients who want to use TradingView (or a similar charting library).
 
+Primarily we want to illustrate optimal ways to:
+
+- Quickly switch between widths without delay to WebSocket messages
+- Load instruments that are non-trading (e.g., over the weekend), using market hours to efficiently query for last data without many redundant API requests
+- Seamlessly load in history when continuously panning and zooming viewport
+- Cache history so that returning to the same symbol and width does not require duplicate API requests
+
 ## Prerequisites
 
 - Docker and Docker Compose
