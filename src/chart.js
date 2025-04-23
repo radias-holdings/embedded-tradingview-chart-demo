@@ -366,9 +366,6 @@ export class ChartComponent {
           if (lastStart === null || newStart < lastStart) {
             console.log(`No candles found, retrying with expanded range: ${new Date(newStart).toISOString()}`);
             
-            // Wait a moment before retrying to avoid hammering the API
-            await new Promise(resolve => setTimeout(resolve, 100));
-            
             // Recursive call with increased retry count
             return this.loadDataForRange(newStart, end, effectiveLimit, retryCount + 1, start);
           }
@@ -440,7 +437,7 @@ export class ChartComponent {
         high: candle.high,
         low: candle.low,
         close: candle.close,
-        volume: candle.volume || 0
+        volume: candle.volume || 0 // Only used for tooltip info
       };
       
       // Update or add to data array
