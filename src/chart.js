@@ -2,7 +2,6 @@ import { createChart } from 'lightweight-charts';
 import { 
   formatCandleData, 
   mergeCandles, 
-  parseInterval,
   calculateDataRange,
   findNearestTradingDay,
   calculateSubscriptionRange,
@@ -322,11 +321,6 @@ export class ChartComponent {
           
           await this.loadDataForRange(range.start, range.end, range.limit);
         }
-        
-        // Update WebSocket subscription
-        if (visibleRange) {
-          await this.updateRealtimeSubscription(visibleRange);
-        }
       } catch (error) {
         console.error('Error handling time range change:', error);
       }
@@ -425,69 +419,6 @@ export class ChartComponent {
   }
 
   /**
-   * Update realtime subscription based on visible range
-   */
-  async updateRealtimeSubscription(visibleRange) {
-    if (!this.symbol || !this.interval) return;
-    
-    // Calculate subscription range
-    const subRange = calculateSubscriptionRange(this.interval, visibleRange);
-    
-    // Unsubscribe from previous
-    if (this.realtimeCallback) {
-      await this.apiService.unsubscribeFromCandles(
-        this.symbol, 
-        this.interval, 
-        this.realtimeCallback
-      );
-      this.realtimeCallback = null;
-    }
-    
-    // Create new callback for realtime updates
-    this.realtimeCallback = (candle) => {
-      // Convert to chart format
-      const timestamp = Math.floor(candle.timestamp / 1000);
-      
-      const candleData = {
-        time: timestamp,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume || 0 // Keep volume for the tooltip
-      };
-      
-      // Update or add to data array
-      const index = this.data.findIndex(c => c.time === timestamp);
-      
-      if (index >= 0) {
-        this.data[index] = candleData;
-      } else {
-        this.data.push(candleData);
-        this.data.sort((a, b) => a.time - b.time);
-      }
-      
-      // Update chart
-      this.candleSeries.update(candleData);
-      
-      // Update loaded range
-      if (this.lastLoadedRange) {
-        this.lastLoadedRange.end = Math.max(
-          this.lastLoadedRange.end, 
-          candle.timestamp
-        );
-      }
-    };
-    
-    // Subscribe to updates
-    await this.apiService.subscribeToCandles(
-      this.symbol, 
-      this.interval, 
-      this.realtimeCallback
-    );
-  }
-
-  /**
    * Load symbol and interval
    */
   async loadSymbol(symbol, interval) {
@@ -576,11 +507,48 @@ export class ChartComponent {
         await this.loadDataForRange(start, end, limit);
       }
       
-      // Set up realtime subscription
-      const visibleRange = this.chart.timeScale().getVisibleRange();
-      if (visibleRange) {
-        await this.updateRealtimeSubscription(visibleRange);
-      }
+      // Set up realtime subscription (only once per symbol/interval)
+      this.realtimeCallback = (candle) => {
+        // Convert to chart format
+        const timestamp = Math.floor(candle.timestamp / 1000);
+        
+        const candleData = {
+          time: timestamp,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume || 0 // Keep volume for the tooltip
+        };
+        
+        // Update or add to data array
+        const index = this.data.findIndex(c => c.time === timestamp);
+        
+        if (index >= 0) {
+          this.data[index] = candleData;
+        } else {
+          this.data.push(candleData);
+          this.data.sort((a, b) => a.time - b.time);
+        }
+        
+        // Update chart
+        this.candleSeries.update(candleData);
+        
+        // Update loaded range
+        if (this.lastLoadedRange) {
+          this.lastLoadedRange.end = Math.max(
+            this.lastLoadedRange.end, 
+            candle.timestamp
+          );
+        }
+      };
+      
+      // Subscribe to updates for this symbol and interval
+      await this.apiService.subscribeToCandles(
+        this.symbol, 
+        this.interval, 
+        this.realtimeCallback
+      );
       
       // Fit content to view
       this.chart.timeScale().fitContent();
