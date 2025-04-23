@@ -219,8 +219,7 @@ export class ChartComponent {
     const tooltipWidth = 220; // from CSS max-width
     const tooltipHeight = 180; // approximate height based on content
     
-    // Always position the tooltip to the top-right of the cursor with a fixed offset
-    // This ensures it's consistently visible and not under the mouse
+    // Position the tooltip to the top-right of the cursor with a fixed offset
     let left = param.point.x + 20; // Offset to the right
     let top = param.point.y - tooltipHeight - 10; // Offset above the cursor
     
