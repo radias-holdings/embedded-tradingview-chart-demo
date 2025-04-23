@@ -25,7 +25,6 @@ export function parseInterval(interval) {
 
 /**
  * Format price with precision based on value.
- * In future, use the digits from instrument data.
  */
 export function formatPrice(price, _symbol) {
   if (price === undefined || price === null || isNaN(price)) {
@@ -34,7 +33,6 @@ export function formatPrice(price, _symbol) {
   
   let precision = undefined;
 
-  // Arbitrary... just a guide
   if (price < 0.1) {
     precision = 6;
   } else if (price < 1) {
@@ -43,7 +41,6 @@ export function formatPrice(price, _symbol) {
     precision = 2;
   }
   
-  // Format the price with commas for thousands and fixed precision
   return price.toLocaleString('en-US', {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision
@@ -68,18 +65,8 @@ export function formatDate(timestamp, interval) {
   }
   
   // Different formats based on interval
-  if (unit === 'm') {
-    // Minutes
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric',
-      year: 'numeric'
-    }) + ' ' + date.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  } else if (unit === 'h') {
-    // Hours
+  if (unit === 'm' || unit === 'h') {
+    // Minutes or Hours
     return date.toLocaleDateString('en-US', { 
       month: 'short', 
       day: 'numeric',
@@ -155,7 +142,7 @@ export function formatCandleData(candles) {
         high,
         low,
         close,
-        volume // Keep volume data for tooltip display
+        volume
       };
     })
     .filter(candle => candle !== null)
@@ -202,7 +189,7 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   const visibleBars = Math.ceil(viewportDuration / intervalMs);
   
   // Request more bars for smooth scrolling
-  const padding = Math.max(Math.ceil(visibleBars * 1.5), 200);
+  const padding = Math.max(Math.ceil(visibleBars * 2), 300);
   
   return {
     start: start - (intervalMs * padding),
@@ -245,63 +232,4 @@ export function isMarketOpen(instrument, timestamp) {
   const closeMinutes = closeHour * 60 + closeMinute;
   
   return currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
-}
-
-/**
- * Find the nearest trading day in the past
- */
-export function findNearestTradingDay(instrument, timestamp) {
-  // For 24/7 markets like crypto, return the same timestamp
-  if (!instrument || instrument.category === 'Crypto') {
-    return timestamp;
-  }
-  
-  if (!instrument.market || !Array.isArray(instrument.market)) {
-    return timestamp;
-  }
-  
-  let currentTimestamp = timestamp;
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  
-  // Look back up to 30 days
-  for (let i = 0; i < 30; i++) {
-    if (isMarketOpen(instrument, currentTimestamp)) {
-      return currentTimestamp;
-    }
-    // Go back one day
-    currentTimestamp -= oneDayMs;
-  }
-  
-  // If no trading day found, return original timestamp
-  return timestamp;
-}
-
-/**
- * Check if a timestamp is within a range
- */
-export function isTimestampInRange(timestamp, start, end) {
-  if (typeof timestamp !== 'number' || typeof start !== 'number' || typeof end !== 'number') {
-    return false;
-  }
-  return timestamp >= start && timestamp <= end;
-}
-
-/**
- * Calculate subscription range with padding
- */
-export function calculateSubscriptionRange(interval, visibleRange) {
-  if (!visibleRange || typeof visibleRange.from !== 'number' || typeof visibleRange.to !== 'number') {
-    const now = Math.floor(Date.now() / 1000);
-    return { from: now - 86400, to: now + 86400 }; // Default 1 day each way
-  }
-  
-  const intervalMs = parseInterval(interval);
-  const intervalSec = intervalMs / 1000;
-  const { from, to } = visibleRange;
-  
-  // Add padding (10 bars)
-  return {
-    from: from - (intervalSec * 10),
-    to: to + (intervalSec * 10)
-  };
 }

@@ -4,10 +4,9 @@ import {
   mergeCandles, 
   parseInterval,
   calculateDataRange,
-  findNearestTradingDay,
-  calculateSubscriptionRange,
   formatPrice,
-  formatDate
+  formatDate,
+  isMarketOpen
 } from './utils';
 
 /**
@@ -34,6 +33,10 @@ export class ChartComponent {
     
     // Data cache
     this.dataCache = new Map();
+
+    // History loading configuration
+    this.maxHistoryRetries = 5;
+    this.maxHistoryRequestSize = 7900;
     
     this.init();
   }
@@ -87,7 +90,7 @@ export class ChartComponent {
         rightBarStaysOnScroll: true,
         borderVisible: true,
         visible: true,
-        timeFormat: this.getTimeFormatOptions(),
+        timeFormat: '{yyyy}-{MM}-{dd} {HH}:{mm}',
       },
       rightPriceScale: {
         borderColor: '#e0e4e8',
@@ -98,7 +101,7 @@ export class ChartComponent {
         },
       },
       localization: {
-        priceFormatter: this.getPriceFormatter(),
+        priceFormatter: price => formatPrice(price, this.symbol),
       },
       handleScroll: {
         vertTouchDrag: true,
@@ -125,22 +128,6 @@ export class ChartComponent {
   }
   
   /**
-   * Get custom price formatter
-   */
-  getPriceFormatter() {
-    return (price) => {
-      return formatPrice(price, this.symbol);
-    };
-  }
-  
-  /**
-   * Get time format options based on interval
-   */
-  getTimeFormatOptions() {
-    return '{yyyy}-{MM}-{dd} {HH}:{mm}';
-  }
-  
-  /**
    * Handle crosshair move to display custom tooltip
    */
   handleCrosshairMove(param) {
@@ -159,7 +146,7 @@ export class ChartComponent {
     }
     
     // Find the data point
-    const dataPoint = this.findDataPointByTime(param.time);
+    const dataPoint = this.data.find(candle => candle.time === param.time);
     if (!dataPoint) {
       this.tooltipElement.classList.remove('visible');
       return;
@@ -220,8 +207,7 @@ export class ChartComponent {
     const tooltipWidth = 220; // from CSS max-width
     const tooltipHeight = 180; // approximate height based on content
     
-    // Always position the tooltip to the top-right of the cursor with a fixed offset
-    // This ensures it's consistently visible and not under the mouse
+    // Position to the top-right of the cursor with a fixed offset
     let left = param.point.x + 20; // Offset to the right
     let top = param.point.y - tooltipHeight - 10; // Offset above the cursor
     
@@ -242,15 +228,6 @@ export class ChartComponent {
     this.tooltipElement.style.left = `${left}px`;
     this.tooltipElement.style.top = `${top}px`;
     this.tooltipElement.classList.add('visible');
-  }
-  
-  /**
-   * Find a data point by timestamp
-   */
-  findDataPointByTime(time) {
-    if (!this.data || !this.data.length) return null;
-    
-    return this.data.find(candle => candle.time === time);
   }
 
   /**
@@ -300,11 +277,6 @@ export class ChartComponent {
             needsLoading = true;
             loadEnd = start;
             loadStart = fromMs - (end - start) * 0.5; // Load 50% more history
-          } else if (toMs > (end - buffer)) {
-            // Need to load later data
-            needsLoading = true;
-            loadStart = end;
-            loadEnd = toMs + (toMs - fromMs) * 0.5; // Load 50% more future
           }
         } else {
           // No data loaded yet
@@ -321,11 +293,6 @@ export class ChartComponent {
           );
           
           await this.loadDataForRange(range.start, range.end, range.limit);
-        }
-        
-        // Update WebSocket subscription
-        if (visibleRange) {
-          await this.updateRealtimeSubscription(visibleRange);
         }
       } catch (error) {
         console.error('Error handling time range change:', error);
@@ -352,9 +319,9 @@ export class ChartComponent {
   }
 
   /**
-   * Load data for a specific time range
+   * Load data for a specific time range with exponential backoff for gaps
    */
-  async loadDataForRange(start, end, limit) {
+  async loadDataForRange(start, end, limit, retryCount = 0, lastStart = null) {
     // If already loading, return the existing promise
     if (this.loadingPromise) {
       return this.loadingPromise;
@@ -374,18 +341,38 @@ export class ChartComponent {
           }
         }
         
-        // For instruments with limited trading hours, adjust the start time
+        // Apply limit constraints
+        const effectiveLimit = Math.min(limit || 1000, this.maxHistoryRequestSize);
+        
+        // For the first attempt, try to find a trading day
         let adjustedStart = start;
-        if (this.instrumentData && this.instrumentData.category !== 'Crypto') {
-          adjustedStart = findNearestTradingDay(this.instrumentData, adjustedStart);
-        }
+        let requestStart = adjustedStart;
         
         // Fetch candles
         const candles = await this.apiService.fetchCandles(this.symbol, this.interval, {
-          start: adjustedStart,
+          start: requestStart,
           end,
-          limit
+          limit: effectiveLimit
         });
+        
+        // If we didn't get any candles and haven't reached max retries, use exponential backoff
+        if ((!candles || candles.length === 0) && retryCount < this.maxHistoryRetries) {
+          // Calculate exponentially larger time range for the next attempt
+          const intervalMs = parseInterval(this.interval);
+          const backoffFactor = Math.pow(2, retryCount + 1);
+          const newStart = start - (intervalMs * backoffFactor * 100); // Try 2ⁿ times further back
+          
+          // Ensure we're not retrying the same start time
+          if (lastStart === null || newStart < lastStart) {
+            console.log(`No candles found, retrying with expanded range: ${new Date(newStart).toISOString()}`);
+            
+            // Wait a moment before retrying to avoid hammering the API
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // Recursive call with increased retry count
+            return this.loadDataForRange(newStart, end, effectiveLimit, retryCount + 1, start);
+          }
+        }
         
         if (candles && candles.length > 0) {
           const formattedCandles = formatCandleData(candles);
@@ -394,9 +381,12 @@ export class ChartComponent {
           this.updateSeries();
           
           // Update loaded range
+          const candleStartTime = Math.min(...formattedCandles.map(c => c.time * 1000));
+          const candleEndTime = Math.max(...formattedCandles.map(c => c.time * 1000));
+          
           this.lastLoadedRange = {
-            start: Math.min(adjustedStart, this.lastLoadedRange?.start || Infinity),
-            end: Math.max(end, this.lastLoadedRange?.end || 0)
+            start: Math.min(candleStartTime, this.lastLoadedRange?.start || Infinity),
+            end: Math.max(candleEndTime, this.lastLoadedRange?.end || 0)
           };
         }
         
@@ -425,22 +415,18 @@ export class ChartComponent {
   }
 
   /**
-   * Update realtime subscription based on visible range
+   * Subscribe to real-time updates for current symbol/interval
    */
-  async updateRealtimeSubscription(visibleRange) {
+  async setupRealtimeSubscription() {
     if (!this.symbol || !this.interval) return;
     
-    // Calculate subscription range
-    const subRange = calculateSubscriptionRange(this.interval, visibleRange);
-    
-    // Unsubscribe from previous
+    // Unsubscribe from previous if exists
     if (this.realtimeCallback) {
       await this.apiService.unsubscribeFromCandles(
         this.symbol, 
         this.interval, 
         this.realtimeCallback
       );
-      this.realtimeCallback = null;
     }
     
     // Create new callback for realtime updates
@@ -454,7 +440,7 @@ export class ChartComponent {
         high: candle.high,
         low: candle.low,
         close: candle.close,
-        volume: candle.volume || 0 // Keep volume for the tooltip
+        volume: candle.volume || 0
       };
       
       // Update or add to data array
@@ -560,14 +546,9 @@ export class ChartComponent {
           default: start = end - (30 * 24 * 60 * 60 * 1000); limit = 1000;
         }
         
-        // Fetch instrument data and initial candles
+        // Fetch instrument data
         try {
           this.instrumentData = await this.apiService.fetchInstrument(symbol);
-          
-          // Adjust start time for non-crypto instruments
-          if (this.instrumentData && this.instrumentData.category !== 'Crypto') {
-            start = findNearestTradingDay(this.instrumentData, start);
-          }
         } catch (error) {
           console.warn('Could not fetch instrument data:', error.message);
           // Continue without instrument data
@@ -577,10 +558,7 @@ export class ChartComponent {
       }
       
       // Set up realtime subscription
-      const visibleRange = this.chart.timeScale().getVisibleRange();
-      if (visibleRange) {
-        await this.updateRealtimeSubscription(visibleRange);
-      }
+      await this.setupRealtimeSubscription();
       
       // Fit content to view
       this.chart.timeScale().fitContent();
