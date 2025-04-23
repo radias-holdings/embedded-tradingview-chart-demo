@@ -1,4 +1,16 @@
 /**
+ * Utility functions for chart and data handling
+ */
+
+// Debug logging utility
+const DEBUG = true;
+function log(...args) {
+  if (DEBUG) {
+    console.log(`[Utils]`, ...args);
+  }
+}
+
+/**
  * Parses interval string into milliseconds
  */
 export function parseInterval(interval) {
@@ -126,10 +138,13 @@ export function formatDate(timestamp, interval) {
  */
 export function formatCandleData(candles) {
   if (!Array.isArray(candles) || candles.length === 0) {
+    log('No candles to format');
     return [];
   }
   
-  return candles
+  log(`Formatting ${candles.length} candles`);
+  
+  const formatted = candles
     .map(candle => {
       if (!candle || typeof candle.timestamp === 'undefined') {
         return null;
@@ -143,6 +158,7 @@ export function formatCandleData(candles) {
       const volume = Number(candle.volume || 0);
       
       if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close)) {
+        log('Invalid candle data', candle);
         return null;
       }
       
@@ -160,14 +176,68 @@ export function formatCandleData(candles) {
     })
     .filter(candle => candle !== null)
     .sort((a, b) => a.time - b.time);
+  
+  log(`Formatted ${formatted.length} valid candles, ${candles.length - formatted.length} were invalid`);
+  
+  // Detect significant gaps in data
+  detectAndLogDataGaps(formatted);
+  
+  return formatted;
+}
+
+/**
+ * Detect and log significant gaps in candle data
+ */
+function detectAndLogDataGaps(candles) {
+  if (!candles || candles.length < 2) return;
+  
+  // Calculate expected interval based on first few candles
+  let totalInterval = 0;
+  let countIntervals = 0;
+  
+  // Use up to 10 intervals to calculate average
+  const sampleSize = Math.min(10, candles.length - 1);
+  for (let i = 0; i < sampleSize; i++) {
+    const interval = candles[i + 1].time - candles[i].time;
+    totalInterval += interval;
+    countIntervals++;
+  }
+  
+  const avgInterval = totalInterval / countIntervals;
+  
+  // Look for gaps that are at least 3x the average interval
+  const gaps = [];
+  for (let i = 1; i < candles.length; i++) {
+    const interval = candles[i].time - candles[i - 1].time;
+    
+    // Check if gap is significant (3x average or more)
+    if (interval > avgInterval * 3) {
+      gaps.push({
+        startTime: new Date(candles[i - 1].time * 1000).toLocaleString(),
+        endTime: new Date(candles[i].time * 1000).toLocaleString(),
+        durationSeconds: interval,
+        durationAvgIntervals: interval / avgInterval
+      });
+    }
+  }
+  
+  if (gaps.length > 0) {
+    log(`Detected ${gaps.length} significant gaps in data:`);
+    gaps.forEach((gap, i) => {
+      log(`Gap ${i + 1}: ${gap.startTime} to ${gap.endTime} (${gap.durationSeconds}s, ${gap.durationAvgIntervals.toFixed(1)}x avg interval)`);
+    });
+  }
 }
 
 /**
  * Merge new candle data with existing data, removing duplicates
+ * And ensuring proper order
  */
 export function mergeCandles(existingData, newData) {
   if (!Array.isArray(existingData)) existingData = [];
   if (!Array.isArray(newData)) newData = [];
+  
+  log(`Merging ${existingData.length} existing candles with ${newData.length} new candles`);
   
   if (existingData.length === 0) return [...newData];
   if (newData.length === 0) return [...existingData];
@@ -175,20 +245,40 @@ export function mergeCandles(existingData, newData) {
   // Use Map for deduplication by timestamp
   const candleMap = new Map();
   
+  // Track data stats for logging
+  let existingAdded = 0;
+  let newAdded = 0;
+  let duplicates = 0;
+  
   existingData.forEach(candle => {
     if (candle && typeof candle.time === 'number') {
       candleMap.set(candle.time, candle);
+      existingAdded++;
     }
   });
   
   newData.forEach(candle => {
     if (candle && typeof candle.time === 'number') {
+      if (candleMap.has(candle.time)) {
+        duplicates++;
+      } else {
+        newAdded++;
+      }
+      // Always use the newer data if timestamps match
       candleMap.set(candle.time, candle);
     }
   });
   
-  return Array.from(candleMap.values())
+  // Sort by timestamp
+  const mergedCandles = Array.from(candleMap.values())
     .sort((a, b) => a.time - b.time);
+  
+  log(`Merge result: ${mergedCandles.length} total candles (${existingAdded} existing, ${newAdded} new, ${duplicates} duplicates/updates)`);
+  
+  // Look for gaps in merged data
+  detectAndLogDataGaps(mergedCandles);
+  
+  return mergedCandles;
 }
 
 /**
@@ -202,13 +292,29 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   const visibleBars = Math.ceil(viewportDuration / intervalMs);
   
   // Request more bars for smooth scrolling
-  const padding = Math.max(Math.ceil(visibleBars * 1.5), 200);
+  // Increased padding for better performance when scrolling
+  const padding = Math.max(Math.ceil(visibleBars * 2), 300);
   
-  return {
+  const result = {
     start: start - (intervalMs * padding),
     end: end + (intervalMs * padding),
     limit: visibleBars + (padding * 2)
   };
+  
+  log(`Calculated data range: ${new Date(result.start).toLocaleString()} to ${new Date(result.end).toLocaleString()}, limit: ${result.limit}`);
+  
+  return result;
+}
+
+/**
+ * Check if a given day has market hours defined
+ */
+export function hasMarketHours(instrument, dayOfWeek) {
+  if (!instrument || !instrument.market || !Array.isArray(instrument.market)) {
+    return false;
+  }
+  
+  return instrument.market.some(m => m.open && m.open.day === dayOfWeek);
 }
 
 /**
@@ -229,10 +335,13 @@ export function isMarketOpen(instrument, timestamp) {
   const hour = date.getUTCHours();
   const minute = date.getUTCMinutes();
   
+  // Check if this day has market hours
+  if (!hasMarketHours(instrument, day)) {
+    return false;
+  }
+  
   // Find market hours for the current day
   const marketHours = instrument.market.find(m => m.open && m.open.day === day);
-  
-  if (!marketHours) return false;
   
   // Check if current time is within market hours
   const openHour = marketHours.open.hour;
@@ -248,7 +357,7 @@ export function isMarketOpen(instrument, timestamp) {
 }
 
 /**
- * Find the nearest trading day in the past
+ * Find the nearest trading day in the past and adjust to market open time
  */
 export function findNearestTradingDay(instrument, timestamp) {
   // For 24/7 markets like crypto, return the same timestamp
@@ -260,19 +369,76 @@ export function findNearestTradingDay(instrument, timestamp) {
     return timestamp;
   }
   
-  let currentTimestamp = timestamp;
-  const oneDayMs = 24 * 60 * 60 * 1000;
+  const date = new Date(timestamp);
+  const currentDay = date.getUTCDay();
   
-  // Look back up to 30 days
-  for (let i = 0; i < 30; i++) {
-    if (isMarketOpen(instrument, currentTimestamp)) {
-      return currentTimestamp;
+  // First, check if this is a trading day but outside market hours
+  if (hasMarketHours(instrument, currentDay)) {
+    // Get the market hours for this day
+    const marketHours = instrument.market.find(m => m.open && m.open.day === currentDay);
+    
+    // Create a date object for the market open time on this day
+    const marketOpenTime = new Date(timestamp);
+    marketOpenTime.setUTCHours(marketHours.open.hour, marketHours.open.minute, 0, 0);
+    
+    // Create a date object for the market close time on this day
+    const marketCloseTime = new Date(timestamp);
+    marketCloseTime.setUTCHours(marketHours.close.hour, marketHours.close.minute, 0, 0);
+    
+    // If timestamp is before market open on this day, use market open time
+    if (date < marketOpenTime) {
+      log(`Adjusting timestamp to market open time: ${marketOpenTime.toLocaleString()}`);
+      return marketOpenTime.getTime();
     }
-    // Go back one day
-    currentTimestamp -= oneDayMs;
+    
+    // If timestamp is after market close on this day, find the previous trading day
+    if (date > marketCloseTime) {
+      // Continue to search for previous day
+    } else {
+      // Already within market hours, use original timestamp
+      return timestamp;
+    }
   }
   
-  // If no trading day found, return original timestamp
+  // Find the most recent past day with market hours
+  let daysBack = 1;
+  const maxDaysBack = 10; // Reasonable limit for finding a trading day
+  
+  while (daysBack <= maxDaysBack) {
+    // Calculate the day of week for "daysBack" days ago
+    let prevDay = (currentDay - daysBack) % 7;
+    if (prevDay < 0) prevDay += 7; // Handle negative modulo
+    
+    if (hasMarketHours(instrument, prevDay)) {
+      // Get the market hours for this day
+      const marketHours = instrument.market.find(m => m.open && m.open.day === prevDay);
+      
+      // Create date for that day with market close time (most recent time on that day)
+      const prevDate = new Date(timestamp - (daysBack * 24 * 60 * 60 * 1000));
+      prevDate.setUTCHours(marketHours.close.hour, marketHours.close.minute, 0, 0);
+      
+      log(`Found previous trading day ${daysBack} days back: ${prevDate.toLocaleString()}`);
+      return prevDate.getTime();
+    }
+    
+    daysBack++;
+  }
+  
+  // If no trading day found in the reasonable past, just return a day with valid hours
+  // Find any day with market hours
+  for (const marketDay of instrument.market) {
+    if (marketDay.open && marketDay.close) {
+      const anyDate = new Date(timestamp);
+      // Set to the found day with market close time
+      anyDate.setUTCDate(anyDate.getUTCDate() - ((anyDate.getUTCDay() - marketDay.open.day + 7) % 7));
+      anyDate.setUTCHours(marketDay.close.hour, marketDay.close.minute, 0, 0);
+      
+      log(`Using fallback trading day: ${anyDate.toLocaleString()}`);
+      return anyDate.getTime();
+    }
+  }
+  
+  // Last resort fallback - return original timestamp
   return timestamp;
 }
 
@@ -299,9 +465,73 @@ export function calculateSubscriptionRange(interval, visibleRange) {
   const intervalSec = intervalMs / 1000;
   const { from, to } = visibleRange;
   
-  // Add padding (10 bars)
-  return {
-    from: from - (intervalSec * 10),
-    to: to + (intervalSec * 10)
+  // Add padding (increased from 10 to 20 bars)
+  const result = {
+    from: from - (intervalSec * 20),
+    to: to + (intervalSec * 20)
   };
+  
+  log(`Calculated subscription range: ${new Date(result.from * 1000).toLocaleString()} to ${new Date(result.to * 1000).toLocaleString()}`);
+  
+  return result;
+}
+
+/**
+ * Find data gaps larger than expected interval
+ */
+export function findDataGaps(candles, interval) {
+  if (!candles || candles.length < 2) return [];
+  
+  const intervalMs = parseInterval(interval) / 1000; // Convert to seconds
+  const maxExpectedGap = intervalMs * 1.5; // Allow 50% deviation
+  
+  const gaps = [];
+  
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1];
+    const curr = candles[i];
+    const gap = curr.time - prev.time;
+    
+    if (gap > maxExpectedGap) {
+      gaps.push({
+        start: prev.time,
+        end: curr.time,
+        gap: gap,
+        expectedInterval: intervalMs
+      });
+    }
+  }
+  
+  if (gaps.length > 0) {
+    log(`Found ${gaps.length} gaps in data larger than expected interval:`);
+    gaps.forEach((gap, i) => {
+      const startDate = new Date(gap.start * 1000).toLocaleString();
+      const endDate = new Date(gap.end * 1000).toLocaleString();
+      const expectedIntervalFormatted = formatDuration(gap.expectedInterval);
+      const gapFormatted = formatDuration(gap.gap);
+      
+      log(`Gap ${i + 1}: ${startDate} to ${endDate} (expected: ${expectedIntervalFormatted}, actual: ${gapFormatted})`);
+    });
+  }
+  
+  return gaps;
+}
+
+/**
+ * Format duration in seconds to human-readable format
+ */
+function formatDuration(seconds) {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  } else if (seconds < 3600) {
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  } else if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${minutes}m`;
+  } else {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    return `${days}d ${hours}h`;
+  }
 }
