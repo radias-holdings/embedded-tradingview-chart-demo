@@ -111,7 +111,7 @@ export class ApiService {
       ...(limit ? { limit } : {}),
       ...(formattedStart ? { start: formattedStart } : {}),
       ...(formattedEnd ? { end: formattedEnd } : {}),
-      referer: this.apiBaseUrl.config?.referer
+      referer: this.config.referer
     };
     
     const cacheKey = `candles:${symbol}:${width}:${formattedStart || 'start'}:${formattedEnd || 'end'}:${limit || 'nolimit'}`;
@@ -151,7 +151,7 @@ export class ApiService {
   }
 
   /**
-   * Initialize WebSocket connection with authentication
+   * Initialize WebSocket connection
    */
   async connectWebSocket() {
     // Return existing connection if available
@@ -176,10 +176,7 @@ export class ApiService {
     
     this.wsConnecting = true;
     
-    try {
-      const token = await this.authService.getToken();
-      console.log('Got token for WebSocket connection');
-      
+    try {      
       // Build WebSocket URL with subscriptions and referer
       const subscriptions = Array.from(this.subscriptions.keys());
       const queryParams = new URLSearchParams();
@@ -197,21 +194,13 @@ export class ApiService {
       console.log(`Connecting to WebSocket: ${wsUrlWithParams}`);
       
       return new Promise((resolve, reject) => {
-        try {
-          // Create WebSocket connection
-          const authHeader = `Bearer ${token}`;
-          console.log(`Using auth header: ${authHeader.substring(0, 20)}...`);
-          
+        try {          
           this.ws = new WebSocket(wsUrlWithParams);
           
           // Set up connection handler
           this.ws.onopen = () => {
             console.log('WebSocket connection opened');
-            
-            // Send authentication message as the first message after connection
-            const authMessage = JSON.stringify({ type: 'auth', token: token });
-            this.ws.send(authMessage);
-            console.log('Sent authentication message to WebSocket');
+          
             
             this.reconnectAttempts = 0;
             this.wsConnecting = false;
@@ -219,7 +208,7 @@ export class ApiService {
             // Re-subscribe to all active subscriptions
             subscriptions.forEach(sub => {
               this.ws.send(sub);
-              console.log(`Re-subscribed to ${sub}`);
+              console.log(`Subscribed to ${sub}`);
             });
             
             resolve(this.ws);
