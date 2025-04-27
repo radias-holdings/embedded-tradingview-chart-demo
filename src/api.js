@@ -11,6 +11,7 @@ export class ApiService {
     // Cache management
     this.cache = new Map();
     this.pendingRequests = new Map();
+    this.cachedRanges = new Map();
 
     // WebSocket state
     this.ws = null;
@@ -32,29 +33,89 @@ export class ApiService {
   }
 
   /**
+   * Store range info for data in cache
+   */
+  _storeCachedRange(symbol, width, start, end) {
+    const key = `${symbol}:${width}`;
+    const ranges = this.cachedRanges.get(key) || [];
+    
+    // Add the new range
+    ranges.push({ start, end });
+    
+    // Merge overlapping ranges
+    if (ranges.length > 1) {
+      ranges.sort((a, b) => a.start - b.start);
+      
+      const mergedRanges = [ranges[0]];
+      
+      for (let i = 1; i < ranges.length; i++) {
+        const currentRange = ranges[i];
+        const lastMerged = mergedRanges[mergedRanges.length - 1];
+        
+        if (currentRange.start <= lastMerged.end) {
+          // Ranges overlap, extend the previous range
+          lastMerged.end = Math.max(lastMerged.end, currentRange.end);
+        } else {
+          // No overlap, add as new range
+          mergedRanges.push(currentRange);
+        }
+      }
+      
+      this.cachedRanges.set(key, mergedRanges);
+    } else {
+      this.cachedRanges.set(key, ranges);
+    }
+  }
+
+  /**
+   * Check if a range is already in cache
+   */
+  _isRangeInCache(symbol, width, start, end) {
+    const key = `${symbol}:${width}`;
+    const ranges = this.cachedRanges.get(key);
+    
+    if (!ranges || ranges.length === 0) return false;
+    
+    // Check if any cached range fully contains the requested range
+    return ranges.some(range => range.start <= start && range.end >= end);
+  }
+
+  /**
    * Fetch data with caching and request deduplication
    */
   async fetchWithCache(endpoint, params, cacheKey) {
-    // Check cache first
-    if (this.cache.has(cacheKey)) {
-      console.log(`💾 Cache HIT for: ${cacheKey}`);
-      return this.cache.get(cacheKey);
-    }
-
-    console.log(`💾 Cache MISS for: ${cacheKey}`);
-
-    // Check for overlapping range requests for candles
-    if (endpoint === '/candle' && params.symbol && params.width) {
-      const possibleMatch = this.findOverlappingCandleRequest(params);
-      if (possibleMatch) {
-        console.log(`🔄 Using existing overlapping request for: ${params.symbol}@${params.width}`);
-        return possibleMatch;
+    // For candle requests, check if range is already in cache
+    if (endpoint === '/candle' && params.symbol && params.width && 
+        params.start && params.end) {
+      
+      if (this._isRangeInCache(params.symbol, params.width, params.start, params.end)) {
+        console.log(`💾 Range already in cache for: ${params.symbol}@${params.width}`);
+        // Find the cached data
+        const possibleCache = Array.from(this.cache.entries())
+          .filter(([key, _]) => key.startsWith(`candles:${params.symbol}:${params.width}:`))
+          .sort((a, b) => b[1].length - a[1].length) // Sort by data length (most data first)
+          .map(([_, value]) => value)[0];
+          
+        if (possibleCache) {
+          console.log(`🔍 Using existing cached data for range: ${new Date(params.start).toISOString()} - ${new Date(params.end).toISOString()}`);
+          return possibleCache;
+        }
       }
     }
 
-    // Check for in-flight requests
+
+    // Check for in-flight requests with overlapping ranges
     const requestKey = `${endpoint}:${JSON.stringify(params)}`;
-    if (this.pendingRequests.has(requestKey)) {
+    
+    if (endpoint === '/candle' && params.symbol && params.width) {
+      // Look for an existing request that might satisfy this one
+      const pendingRequest = this._findOverlappingRequest(params);
+      if (pendingRequest) {
+        console.log(`⏳ Using existing in-flight request with overlapping range for: ${params.symbol}@${params.width}`);
+        return pendingRequest;
+      }
+    } else if (this.pendingRequests.has(requestKey)) {
+      // For non-candle requests, check for exact matches
       console.log(`⏳ Using in-flight request for: ${requestKey}`);
       return this.pendingRequests.get(requestKey);
     }
@@ -94,6 +155,12 @@ export class ApiService {
         if (data && (Array.isArray(data) ? data.length > 0 : true)) {
           this.cache.set(cacheKey, data);
 
+          // For candle data, store range info
+          if (endpoint === '/candle' && params.symbol && params.width && 
+              params.start && params.end && Array.isArray(data) && data.length > 0) {
+            this._storeCachedRange(params.symbol, params.width, Number(params.start), Number(params.end));
+          }
+
           // Limit cache size
           if (this.cache.size > 100) {
             const firstKey = this.cache.keys().next().value;
@@ -116,52 +183,51 @@ export class ApiService {
   /**
    * Find an existing pending request that covers the same data range
    */
-  findOverlappingCandleRequest(params) {
-    // Only attempt this optimization for candle requests
-    if (!params.symbol || !params.width) return null;
-
+  _findOverlappingRequest(params) {
     const targetStart = params.start ? Number(params.start) : 0;
     const targetEnd = params.end ? Number(params.end) : Date.now();
+    const targetSymbol = params.symbol;
+    const targetWidth = params.width;
 
-    // Look through pending requests to find one that encompasses our range
+    // Check all pending requests
     for (const [key, promise] of this.pendingRequests.entries()) {
       if (!key.startsWith('/candle:')) continue;
 
       try {
-        // Parse the existing request params
+        // Parse existing request params
         const existingParams = JSON.parse(key.split(':', 2)[1]);
         
         // Only consider requests for the same symbol and width
-        if (existingParams.symbol !== params.symbol || existingParams.width !== params.width) {
+        if (existingParams.symbol !== targetSymbol || existingParams.width !== targetWidth) {
           continue;
         }
 
         const existingStart = existingParams.start ? Number(existingParams.start) : 0;
         const existingEnd = existingParams.end ? Number(existingParams.end) : Date.now();
         
-        // If the existing request range fully contains our target range
-        // or the existing request has a larger limit that likely covers our needs
-        const containsRange = existingStart <= targetStart && existingEnd >= targetEnd;
-        const largerLimit = !params.limit || (existingParams.limit && existingParams.limit >= params.limit * 1.5);
+        // Ranges overlap if one contains the other
+        const rangeContained = (existingStart <= targetStart && existingEnd >= targetEnd) ||
+                              (targetStart <= existingStart && targetEnd >= existingEnd);
+                              
+        // Or if they partially overlap
+        const rangesOverlap = (existingStart <= targetEnd && existingEnd >= targetStart);
         
-        if (containsRange && largerLimit) {
-          console.log(`🔄 Found overlapping candle request that encompasses ${params.symbol}@${params.width}`, {
-            existingRange: {
-              start: new Date(existingStart).toISOString(), 
-              end: new Date(existingEnd).toISOString()
-            },
-            targetRange: {
-              start: new Date(targetStart).toISOString(), 
-              end: new Date(targetEnd).toISOString()
-            },
-            existingLimit: existingParams.limit,
-            targetLimit: params.limit
+        // Use the request if it contains our range or has significant overlap
+        const significantOverlap = rangeContained || 
+                                  (rangesOverlap && 
+                                   (Math.min(targetEnd, existingEnd) - Math.max(targetStart, existingStart)) / 
+                                   (targetEnd - targetStart) > 0.7);
+
+        if (significantOverlap) {
+          console.log(`🔄 Found overlapping request for ${targetSymbol}@${targetWidth}`, {
+            existing: `${new Date(existingStart).toISOString()} - ${new Date(existingEnd).toISOString()}`,
+            requested: `${new Date(targetStart).toISOString()} - ${new Date(targetEnd).toISOString()}`
           });
           return promise;
         }
       } catch (error) {
-        console.error(`Error parsing existing request key ${key}:`, error);
-        // Skip this entry if we can't parse it
+        // Skip if we can't parse the key
+        console.error(`Error parsing key ${key}:`, error);
         continue;
       }
     }
@@ -455,6 +521,7 @@ export class ApiService {
     this.subscriptions.clear();
     this.pendingRequests.clear();
     this.cache.clear();
+    this.cachedRanges.clear();
   }
 }
 

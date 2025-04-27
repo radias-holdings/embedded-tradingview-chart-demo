@@ -31,9 +31,10 @@ export class ChartComponent {
     this._timeRangeChangeTimeout = null;
     this.tooltipElement = document.getElementById("tooltip-container");
     
-    this.initialLoadInProgress = false;
-    this.initialLoadComplete = false;
+    this.isInitializing = false;
+    this.timeRangeChangeCooldown = false;
 
+    // Data cache
     this.dataCache = new Map();
 
     this.init();
@@ -118,14 +119,38 @@ export class ChartComponent {
 
     // Add event listeners
     window.addEventListener("resize", this.handleResize.bind(this));
+    
+    // Only subscribe to time range changes after initialization
+    this._subscribeToTimeRangeChanges();
+
+    // Subscribe to crosshair move event for custom tooltip
+    this.chart.subscribeCrosshairMove(this.handleCrosshairMove.bind(this));
+  }
+
+  /**
+   * Subscribe to time range changes
+   */
+  _subscribeToTimeRangeChanges() {
+    if (!this.chart) return;
+    
     this.chart
       .timeScale()
       .subscribeVisibleLogicalRangeChange(
         this.handleTimeRangeChange.bind(this)
       );
+  }
 
-    // Subscribe to crosshair move event for custom tooltip
-    this.chart.subscribeCrosshairMove(this.handleCrosshairMove.bind(this));
+  /**
+   * Temporarily unsubscribe from time range changes
+   */
+  _unsubscribeFromTimeRangeChanges() {
+    if (!this.chart) return;
+    
+    this.chart
+      .timeScale()
+      .unsubscribeVisibleLogicalRangeChange(
+        this.handleTimeRangeChange.bind(this)
+      );
   }
 
   /**
@@ -287,17 +312,15 @@ export class ChartComponent {
    * Handle time range changes (viewport navigation)
    */
   async handleTimeRangeChange(logicalRange) {
-    // Skip time range changes during initial load
-    if (!this.symbol || !this.interval || !logicalRange || this.isLoading || this.initialLoadInProgress) {
-      console.log(
-        `⏭️ Skipping time range change - no symbol/interval, loading, or initial load in progress`
-      );
+    // Skip during initialization or cooldown period
+    if (this.isInitializing || this.timeRangeChangeCooldown || this.isLoading) {
+      console.log(`⏭️ Skipping time range change - initialization/cooldown/loading in progress`);
       return;
     }
 
-    // Wait for initial load to complete before handling user navigation
-    if (!this.initialLoadComplete) {
-      console.log(`⏭️ Skipping time range change - waiting for initial load to complete`);
+    // If no symbol or interval, skip
+    if (!this.symbol || !this.interval || !logicalRange) {
+      console.log(`⏭️ Skipping time range change - no symbol or interval`);
       return;
     }
 
@@ -383,6 +406,20 @@ export class ChartComponent {
   }
 
   /**
+   * Check if requested range overlaps with already loaded data
+   */
+  isRangeAlreadyLoaded(start, end) {
+    if (!this.lastLoadedRange || !this.data.length) return false;
+    
+    // Allow for some buffer at the edges
+    const buffer = parseFloat(this.interval) * 24 * 60 * 60 * 1000; // One day buffer
+    const loadedStart = this.lastLoadedRange.start - buffer;
+    const loadedEnd = this.lastLoadedRange.end + buffer;
+    
+    return start >= loadedStart && end <= loadedEnd;
+  }
+
+  /**
    * Load data for a specific time range
    */
   async loadDataForRange(start, end, limit) {
@@ -393,10 +430,7 @@ export class ChartComponent {
     }
 
     // Check if the requested range is already covered by loaded data
-    if (this.lastLoadedRange && 
-        start >= this.lastLoadedRange.start && 
-        end <= this.lastLoadedRange.end &&
-        this.data.length > 0) {
+    if (this.isRangeAlreadyLoaded(start, end)) {
       console.log(`✅ Requested range already loaded: ${new Date(start).toISOString()} - ${new Date(end).toISOString()}`);
       return Promise.resolve(this.data);
     }
@@ -430,13 +464,7 @@ export class ChartComponent {
             console.warn("Could not fetch instrument data:", error.message);
           }
         } else {
-          console.log(`📌 Using cached instrument data: ${this.symbol}`, {
-            category: this.instrumentData.category,
-            hasTradingHours: !!(
-              this.instrumentData.market &&
-              this.instrumentData.market.length > 0
-            ),
-          });
+          console.log(`📌 Using cached instrument data: ${this.symbol}`);
         }
 
         // For instruments with limited trading hours, adjust the start time
@@ -477,8 +505,6 @@ export class ChartComponent {
             count: candles.length,
             firstCandle: new Date(firstCandle.timestamp).toISOString(),
             lastCandle: new Date(lastCandle.timestamp).toISOString(),
-            requestedStart: new Date(adjustedStart).toISOString(),
-            requestedEnd: new Date(end).toISOString(),
           });
 
           const formattedCandles = formatCandleData(candles);
@@ -525,6 +551,7 @@ export class ChartComponent {
 
     return this.loadingPromise;
   }
+
   /**
    * Update chart series with current data
    */
@@ -533,6 +560,68 @@ export class ChartComponent {
 
     // Update candlestick series
     this.candleSeries.setData(this.data);
+  }
+
+  /**
+   * Calculate optimal load range based on interval
+   */
+  calculateInitialLoadRange(interval) {
+    const end = Date.now();
+    let start, limit;
+
+    // Comprehensive initial data load to prevent multiple requests
+    switch (interval) {
+      case "1m":
+        start = end - 24 * 60 * 60 * 1000; // 24 hours
+        limit = 1440; // 1440 minutes in a day
+        break;
+      case "5m":
+        start = end - 3 * 24 * 60 * 60 * 1000; // 3 days
+        limit = 864; // 3 * 288 intervals
+        break;
+      case "15m":
+        start = end - 7 * 24 * 60 * 60 * 1000; // 7 days
+        limit = 672; // 96 * 7 intervals
+        break;
+      case "30m":
+        start = end - 14 * 24 * 60 * 60 * 1000; // 14 days
+        limit = 672; // 48 * 14 intervals
+        break;
+      case "1h":
+        start = end - 30 * 24 * 60 * 60 * 1000; // 30 days
+        limit = 720; // 24 * 30 intervals
+        break;
+      case "2h":
+        start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
+        limit = 720; // 12 * 60 intervals
+        break;
+      case "4h":
+        start = end - 90 * 24 * 60 * 60 * 1000; // 90 days
+        limit = 540; // 6 * 90 intervals
+        break;
+      case "12h":
+        start = end - 180 * 24 * 60 * 60 * 1000; // 180 days
+        limit = 360; // 2 * 180 intervals
+        break;
+      case "1d":
+        start = end - 1 * 365 * 24 * 60 * 60 * 1000; // 1 year
+        limit = 365;
+        break;
+      case "1w":
+        start = end - 5 * 365 * 24 * 60 * 60 * 1000; // 5 years
+        limit = 260; // 52 * 5 weeks
+        break;
+      case "1mo":
+        start = end - 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
+        limit = 120; // 12 * 10 months
+        break;
+      default:
+        console.warn(`⚠️ Unknown interval: ${interval}, defaulting to 1 year`);
+        start = end - 365 * 24 * 60 * 60 * 1000; // 1 year
+        limit = 1000;
+    }
+
+    return { start, end, limit };
   }
 
   /**
@@ -550,8 +639,9 @@ export class ChartComponent {
       return;
     }
 
-    this.initialLoadInProgress = true;
-    this.initialLoadComplete = false;
+    // Set initialization flags and disable time range change events
+    this.isInitializing = true;
+    this._unsubscribeFromTimeRangeChanges();
     this.setLoadingState(true);
 
     try {
@@ -603,65 +693,10 @@ export class ChartComponent {
         this.lastLoadedRange = null;
         this.instrumentData = null;
 
-        // Calculate optimal range based on interval and get enough data for the full view
-        const end = Date.now();
-        let start, limit;
+        // Get optimal data range for initial load
+        const { start, end, limit } = this.calculateInitialLoadRange(interval);
 
-        // Load a larger initial dataset to reduce the need for immediate subsequent loads
-        switch (interval) {
-          case "1m":
-            start = end - 24 * 60 * 60 * 1000; // 24 hours
-            limit = 1440; // 1440 minutes in a day
-            break;
-          case "5m":
-            start = end - 2 * 24 * 60 * 60 * 1000; // 2 days
-            limit = 576; // 288 * 2
-            break;
-          case "15m":
-            start = end - 7 * 24 * 60 * 60 * 1000; // 7 days
-            limit = 672; // 96 * 7
-            break;
-          case "30m":
-            start = end - 14 * 24 * 60 * 60 * 1000; // 14 days
-            limit = 672; // 48 * 14
-            break;
-          case "1h":
-            start = end - 30 * 24 * 60 * 60 * 1000; // 30 days
-            limit = 720; // 24 * 30
-            break;
-          case "2h":
-            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
-            limit = 720; // 12 * 60
-            break;
-          case "4h":
-            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
-            limit = 360; // 6 * 60
-            break;
-          case "12h":
-            start = end - 180 * 24 * 60 * 60 * 1000; // 180 days
-            limit = 360; // 2 * 180
-            break;
-          case "1d":
-            start = end - 2 * 365 * 24 * 60 * 60 * 1000; // 2 years
-            limit = 730; // 2 * 365
-            break;
-          case "1w":
-            start = end - 5 * 365 * 24 * 60 * 60 * 1000; // 5 years
-            limit = 260; // 52 * 5
-            break;
-          case "1mo":
-            start = end - 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
-            limit = 120; // 12 * 10
-            break;
-          default:
-            console.warn(
-              `⚠️ Unknown interval: ${interval}. Defaulting to 60 days.`
-            );
-            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
-            limit = 1000;
-        }
-
-        // Fetch instrument data and initial candles
+        // Fetch instrument data first
         try {
           this.instrumentData = await this.apiService.fetchInstrument(symbol);
 
@@ -670,17 +705,21 @@ export class ChartComponent {
             this.instrumentData &&
             this.instrumentData.category !== "Crypto"
           ) {
-            start = findNearestTradingDay(this.instrumentData, start);
+            const adjustedStart = findNearestTradingDay(this.instrumentData, start);
+            if (adjustedStart !== start) {
+              console.log(`⏱️ Adjusted initial start time for ${symbol}`);
+            }
           }
         } catch (error) {
           console.warn("Could not fetch instrument data:", error.message);
           // Continue without instrument data
         }
 
+        // Single comprehensive data load
         await this.loadDataForRange(start, end, limit);
       }
 
-      // Set up realtime subscription (only once per symbol/interval)
+      // Set up realtime subscription
       this.realtimeCallback = (candle) => {
         // Convert to chart format
         const timestamp = Math.floor(candle.timestamp / 1000);
@@ -723,10 +762,8 @@ export class ChartComponent {
         this.realtimeCallback
       );
 
-      // Fit content to view
+      // Fit content to view (temporarily suspend time range change handling)
       this.chart.timeScale().fitContent();
-
-      this.initialLoadComplete = true;
 
       return this.data;
     } catch (error) {
@@ -737,7 +774,16 @@ export class ChartComponent {
       throw error;
     } finally {
       this.setLoadingState(false);
-      this.initialLoadInProgress = false;
+      
+      // Prevent immediate follow-up requests by setting a cooldown period
+      this.timeRangeChangeCooldown = true;
+      setTimeout(() => {
+        // Re-enable time range changes after initialization complete
+        this.isInitializing = false;
+        this.timeRangeChangeCooldown = false;
+        this._subscribeToTimeRangeChanges();
+        console.log("✅ Chart initialization complete, time range change handling enabled");
+      }, 1000); // 1 second cooldown before allowing new requests
     }
   }
 

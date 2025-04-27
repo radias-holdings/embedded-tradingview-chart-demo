@@ -193,26 +193,53 @@ export function mergeCandles(existingData, newData) {
   if (existingData.length === 0) return [...newData];
   if (newData.length === 0) return [...existingData];
 
+  // Fast path: if data ranges don't overlap, use concatenation and sort
+  if (newData.length > 0 && existingData.length > 0) {
+    const existingMin = existingData[0].time;
+    const existingMax = existingData[existingData.length - 1].time;
+    const newMin = newData[0].time;
+    const newMax = newData[newData.length - 1].time;
+
+    // If data sets don't overlap, we can avoid the map operation
+    if (newMax < existingMin) {
+      // New data is entirely before existing data
+      return [...newData, ...existingData];
+    }
+
+    if (newMin > existingMax) {
+      // New data is entirely after existing data
+      return [...existingData, ...newData];
+    }
+  }
+
   // Use Map for deduplication by timestamp
   const candleMap = new Map();
 
-  existingData.forEach((candle) => {
+  // Pre-sort data to potentially improve merging performance
+  const sortedExisting = [...existingData].sort((a, b) => a.time - b.time);
+  const sortedNew = [...newData].sort((a, b) => a.time - b.time);
+
+  // Put existing data in the map
+  for (const candle of sortedExisting) {
     if (candle && typeof candle.time === "number") {
       candleMap.set(candle.time, candle);
     }
-  });
+  }
 
-  newData.forEach((candle) => {
+  // Add or update with new data
+  for (const candle of sortedNew) {
     if (candle && typeof candle.time === "number") {
       candleMap.set(candle.time, candle);
     }
-  });
+  }
 
+  // Convert map back to sorted array
   return Array.from(candleMap.values()).sort((a, b) => a.time - b.time);
 }
 
 /**
  * Calculate optimal data range for a given viewport
+ * With more efficient padding calculation
  */
 export function calculateDataRange(interval, viewportWidth, start, end) {
   const intervalMs = parseInterval(interval);
@@ -221,23 +248,25 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   const viewportDuration = end - start;
   const visibleBars = Math.ceil(viewportDuration / intervalMs);
 
-  // Request more bars for smooth scrolling, but with a reasonable limit
-  // Using a square root scaling to reduce over-fetching while still providing buffer
+  const paddingFactor = 0.3;
+  
+  // Calculate padding bars with a cap
   const padding = Math.min(
-    Math.floor(Math.sqrt(visibleBars) * 10), 
-    Math.max(50, Math.floor(visibleBars * 0.5))
+    Math.ceil(visibleBars * paddingFactor),
+    500 // Hard limit on padding bars
   );
 
-  // Calculate the optimal start and end timestamps
+  // Calculate optimal range with padding
   const optimalStart = start - intervalMs * padding;
   const optimalEnd = end + intervalMs * padding;
   
-  // Calculate a reasonable limit that's proportional to the viewport
-  const limit = visibleBars + padding * 2;
+  // Cap the limit to a reasonable number
+  const limit = Math.min(visibleBars + padding * 2, 1000);
 
   console.log(`🔢 Calculated data range for ${interval}:`, {
     visibleBars,
     padding,
+    paddingFactor,
     requestedRange: {
       start: new Date(optimalStart).toISOString(),
       end: new Date(optimalEnd).toISOString(),
@@ -248,7 +277,7 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   return {
     start: optimalStart,
     end: optimalEnd,
-    limit: limit
+    limit
   };
 }
 
