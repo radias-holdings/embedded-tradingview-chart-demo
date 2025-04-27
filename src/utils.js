@@ -198,24 +198,43 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   const viewportDuration = end - start;
   const visibleBars = Math.ceil(viewportDuration / intervalMs);
 
-  const paddingFactor = 0.3;
+  // Adjust padding based on interval type
+  let paddingFactor;
+  
+  // Smaller intervals need more aggressive padding
+  if (interval === '1m') {
+    paddingFactor = 0.5; // 50% padding for 1m intervals
+  } else if (['5m', '15m', '30m'].includes(interval)) {
+    paddingFactor = 0.4; // 40% padding for smaller intervals
+  } else {
+    paddingFactor = 0.3; // 30% for larger intervals
+  }
   
   // Calculate padding bars with a cap
   const padding = Math.min(
     Math.ceil(visibleBars * paddingFactor),
-    500 // Hard limit on padding bars
+    // Smaller intervals need higher caps
+    interval === '1m' ? 1000 : 
+    ['5m', '15m', '30m'].includes(interval) ? 750 : 
+    500 // Default limit on padding bars
   );
 
   // Calculate optimal range with padding
   const optimalStart = start - intervalMs * padding;
   const optimalEnd = end + intervalMs * padding;
   
-  // Cap the limit to a reasonable number
-  const limit = Math.min(visibleBars + padding * 2, 1000);
+  // Cap the limit to a reasonable number based on interval
+  const maxLimit = 
+    interval === '1m' ? 2000 : 
+    ['5m', '15m', '30m'].includes(interval) ? 1500 : 
+    1000;
+  
+  const limit = Math.min(visibleBars + padding * 2, maxLimit);
 
   console.log(`🔢 Calculated data range for ${interval}:`, {
     visibleBars,
     padding,
+    paddingFactor,
     requestedRange: {
       start: new Date(optimalStart).toISOString(),
       end: new Date(optimalEnd).toISOString(),
