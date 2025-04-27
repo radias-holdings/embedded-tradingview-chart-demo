@@ -417,14 +417,13 @@ export class ChartComponent {
           // Calculate optimal data range
           const range = calculateDataRange(
             this.interval,
-            this.container.clientWidth,
             loadStart,
             loadEnd
           );
 
           // Check if we should load or if we've reached the history limit
           if (this.shouldAttemptHistoryLoad(range.start) || range.start >= this.lastLoadedRange?.start) {
-            await this.loadDataForRange(range.start, range.end, range.limit, forceLoad);
+            await this.loadDataForRange(range.start, range.end, forceLoad);
           } else {
             console.log(`⚠️ Not loading more data, reached history limit or no more data available`);
             this.reachedHistoryLimit = true;
@@ -480,7 +479,7 @@ export class ChartComponent {
   /**
    * Load data for a specific time range
    */
-  async loadDataForRange(start, end, limit, forceLoad = false) {
+  async loadDataForRange(start, end, forceLoad = false) {
     // If already loading, return the existing promise
     if (this.loadingPromise) {
       console.log(`⏭️ Skipping loadDataForRange - already loading data`);
@@ -510,7 +509,6 @@ export class ChartComponent {
         end: new Date(end).toISOString(),
       },
       forceLoad,
-      limit,
     });
 
     this.setLoadingState(true);
@@ -553,7 +551,6 @@ export class ChartComponent {
           {
             start: adjustedStart,
             end,
-            limit,
           }
         );
 
@@ -577,9 +574,8 @@ export class ChartComponent {
 
           // Update loaded range - check if we got enough data to move the range
           if (this.lastLoadedRange) {
-            // If we forced a load and got very little data at the beginning, we may have reached the limit
-            if (forceLoad && candles.length < limit * 0.1 && adjustedStart < this.lastLoadedRange.start) {
-              console.log(`⚠️ Received very little data (${candles.length} candles) when forcing load, may have reached history limit`);
+            if (forceLoad && candles.length == 0 && adjustedStart < this.lastLoadedRange.start) {
+              console.log(`⚠️ Received no candles when forcing load, may have reached history limit`);
               this.reachedHistoryLimit = true;
               
               // Show a more accurate history limit based on the earliest data we have
@@ -657,61 +653,49 @@ export class ChartComponent {
    */
   calculateInitialLoadRange(interval) {
     const end = Date.now();
-    let start, limit;
+    let start;
 
     // Comprehensive initial data load to prevent multiple requests
     switch (interval) {
       case "1m":
         start = end - 24 * 60 * 60 * 1000; // 24 hours
-        limit = 1440; // 1440 minutes in a day
         break;
       case "5m":
         start = end - 3 * 24 * 60 * 60 * 1000; // 3 days
-        limit = 864; // 3 * 288 intervals
         break;
       case "15m":
         start = end - 7 * 24 * 60 * 60 * 1000; // 7 days
-        limit = 672; // 96 * 7 intervals
         break;
       case "30m":
         start = end - 14 * 24 * 60 * 60 * 1000; // 14 days
-        limit = 672; // 48 * 14 intervals
         break;
       case "1h":
         start = end - 30 * 24 * 60 * 60 * 1000; // 30 days
-        limit = 720; // 24 * 30 intervals
         break;
       case "2h":
         start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
-        limit = 720; // 12 * 60 intervals
         break;
       case "4h":
         start = end - 90 * 24 * 60 * 60 * 1000; // 90 days
-        limit = 540; // 6 * 90 intervals
         break;
       case "12h":
         start = end - 180 * 24 * 60 * 60 * 1000; // 180 days
-        limit = 360; // 2 * 180 intervals
         break;
       case "1d":
         start = end - 1 * 365 * 24 * 60 * 60 * 1000; // 1 year
-        limit = 365;
         break;
       case "1w":
         start = end - 5 * 365 * 24 * 60 * 60 * 1000; // 5 years
-        limit = 260; // 52 * 5 weeks
         break;
       case "1mo":
         start = end - 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
-        limit = 120; // 12 * 10 months
         break;
       default:
         console.warn(`⚠️ Unknown interval: ${interval}, defaulting to 1 year`);
         start = end - 365 * 24 * 60 * 60 * 1000; // 1 year
-        limit = 1000;
     }
 
-    return { start, end, limit };
+    return { start, end };
   }
 
   /**
@@ -779,7 +763,7 @@ export class ChartComponent {
         this.instrumentData = null;
 
         // Get optimal data range for initial load
-        const { start, end, limit } = this.calculateInitialLoadRange(interval);
+        const { start, end } = this.calculateInitialLoadRange(interval);
 
         // Fetch instrument data first
         try {
@@ -790,7 +774,7 @@ export class ChartComponent {
         }
 
         // Single comprehensive data load
-        await this.loadDataForRange(start, end, limit);
+        await this.loadDataForRange(start, end);
       }
 
       // Set up realtime subscription

@@ -191,7 +191,7 @@ export function mergeCandles(existingData, newData) {
 /**
  * Calculate optimal data range for a given viewport
  */
-export function calculateDataRange(interval, viewportWidth, start, end) {
+export function calculateDataRange(interval, start, end) {
   const intervalMs = parseInterval(interval);
 
   // Calculate visible bars
