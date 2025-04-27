@@ -221,13 +221,34 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   const viewportDuration = end - start;
   const visibleBars = Math.ceil(viewportDuration / intervalMs);
 
-  // Request more bars for smooth scrolling
-  const padding = Math.max(Math.ceil(visibleBars * 1.5), 200);
+  // Request more bars for smooth scrolling, but with a reasonable limit
+  // Using a square root scaling to reduce over-fetching while still providing buffer
+  const padding = Math.min(
+    Math.floor(Math.sqrt(visibleBars) * 10), 
+    Math.max(50, Math.floor(visibleBars * 0.5))
+  );
+
+  // Calculate the optimal start and end timestamps
+  const optimalStart = start - intervalMs * padding;
+  const optimalEnd = end + intervalMs * padding;
+  
+  // Calculate a reasonable limit that's proportional to the viewport
+  const limit = visibleBars + padding * 2;
+
+  console.log(`🔢 Calculated data range for ${interval}:`, {
+    visibleBars,
+    padding,
+    requestedRange: {
+      start: new Date(optimalStart).toISOString(),
+      end: new Date(optimalEnd).toISOString(),
+      bars: limit
+    }
+  });
 
   return {
-    start: start - intervalMs * padding,
-    end: end + intervalMs * padding,
-    limit: visibleBars + padding * 2,
+    start: optimalStart,
+    end: optimalEnd,
+    limit: limit
   };
 }
 

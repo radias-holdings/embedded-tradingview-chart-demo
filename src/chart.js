@@ -30,8 +30,10 @@ export class ChartComponent {
     this.realtimeCallback = null;
     this._timeRangeChangeTimeout = null;
     this.tooltipElement = document.getElementById("tooltip-container");
+    
+    this.initialLoadInProgress = false;
+    this.initialLoadComplete = false;
 
-    // Data cache
     this.dataCache = new Map();
 
     this.init();
@@ -285,10 +287,17 @@ export class ChartComponent {
    * Handle time range changes (viewport navigation)
    */
   async handleTimeRangeChange(logicalRange) {
-    if (!this.symbol || !this.interval || !logicalRange || this.isLoading) {
+    // Skip time range changes during initial load
+    if (!this.symbol || !this.interval || !logicalRange || this.isLoading || this.initialLoadInProgress) {
       console.log(
-        `⏭️ Skipping time range change - no symbol/interval or loading`
+        `⏭️ Skipping time range change - no symbol/interval, loading, or initial load in progress`
       );
+      return;
+    }
+
+    // Wait for initial load to complete before handling user navigation
+    if (!this.initialLoadComplete) {
+      console.log(`⏭️ Skipping time range change - waiting for initial load to complete`);
       return;
     }
 
@@ -309,25 +318,27 @@ export class ChartComponent {
         const fromMs = from * 1000;
         const toMs = to * 1000;
 
-        // Check if we need to load more data
+        // Check if we need to load more data - only if we're near the edges
         let needsLoading = false;
         let loadStart = fromMs;
         let loadEnd = toMs;
 
         if (this.lastLoadedRange) {
           const { start, end } = this.lastLoadedRange;
-          const buffer = (end - start) * 0.2; // 20% buffer
+          const buffer = (end - start) * 0.1; // 10% buffer
 
           if (fromMs < start + buffer) {
             // Need to load earlier data
             needsLoading = true;
             loadEnd = start;
-            loadStart = fromMs - (end - start) * 0.5; // Load 50% more history
+            loadStart = fromMs - (end - start) * 0.3; // Load 30% more history
+            console.log(`🔄 Need to load earlier data: ${new Date(loadStart).toISOString()} - ${new Date(loadEnd).toISOString()}`);
           } else if (toMs > end - buffer) {
             // Need to load later data
             needsLoading = true;
             loadStart = end;
-            loadEnd = toMs + (toMs - fromMs) * 0.5; // Load 50% more future
+            loadEnd = toMs + (toMs - fromMs) * 0.3; // Load 30% more future
+            console.log(`🔄 Need to load later data: ${new Date(loadStart).toISOString()} - ${new Date(loadEnd).toISOString()}`);
           }
         } else {
           // No data loaded yet
@@ -344,11 +355,13 @@ export class ChartComponent {
           );
 
           await this.loadDataForRange(range.start, range.end, range.limit);
+        } else {
+          console.log(`✅ No additional data needed for current view`);
         }
       } catch (error) {
         console.error("Error handling time range change:", error);
       }
-    }, 300); // 300ms debounce
+    }, 500); // 500ms debounce
   }
 
   /**
@@ -377,6 +390,15 @@ export class ChartComponent {
     if (this.loadingPromise) {
       console.log(`⏭️ Skipping loadDataForRange - already loading data`);
       return this.loadingPromise;
+    }
+
+    // Check if the requested range is already covered by loaded data
+    if (this.lastLoadedRange && 
+        start >= this.lastLoadedRange.start && 
+        end <= this.lastLoadedRange.end &&
+        this.data.length > 0) {
+      console.log(`✅ Requested range already loaded: ${new Date(start).toISOString()} - ${new Date(end).toISOString()}`);
+      return Promise.resolve(this.data);
     }
 
     console.log(`📈 Loading data: ${this.symbol}@${this.interval}`, {
@@ -465,13 +487,22 @@ export class ChartComponent {
           this.updateSeries();
 
           // Update loaded range
-          this.lastLoadedRange = {
-            start: Math.min(
-              adjustedStart,
-              this.lastLoadedRange?.start || Infinity
-            ),
-            end: Math.max(end, this.lastLoadedRange?.end || 0),
-          };
+          if (this.lastLoadedRange) {
+            this.lastLoadedRange = {
+              start: Math.min(
+                adjustedStart,
+                this.lastLoadedRange.start
+              ),
+              end: Math.max(end, this.lastLoadedRange.end),
+            };
+          } else {
+            this.lastLoadedRange = {
+              start: adjustedStart,
+              end: end,
+            };
+          }
+          
+          console.log(`📊 Updated data range: ${new Date(this.lastLoadedRange.start).toISOString()} - ${new Date(this.lastLoadedRange.end).toISOString()}`);
         } else {
           console.warn(
             `⚠️ No candles received: ${this.symbol}@${this.interval}`,
@@ -519,6 +550,8 @@ export class ChartComponent {
       return;
     }
 
+    this.initialLoadInProgress = true;
+    this.initialLoadComplete = false;
     this.setLoadingState(true);
 
     try {
@@ -570,57 +603,61 @@ export class ChartComponent {
         this.lastLoadedRange = null;
         this.instrumentData = null;
 
-        // Calculate optimal range based on interval
+        // Calculate optimal range based on interval and get enough data for the full view
         const end = Date.now();
         let start, limit;
 
+        // Load a larger initial dataset to reduce the need for immediate subsequent loads
         switch (interval) {
           case "1m":
-            start = end - 12 * 60 * 60 * 1000;
-            limit = 720;
+            start = end - 24 * 60 * 60 * 1000; // 24 hours
+            limit = 1440; // 1440 minutes in a day
             break;
           case "5m":
-            start = end - 24 * 60 * 60 * 1000;
-            limit = 288;
+            start = end - 2 * 24 * 60 * 60 * 1000; // 2 days
+            limit = 576; // 288 * 2
             break;
           case "15m":
-            start = end - 3 * 24 * 60 * 60 * 1000;
-            limit = 288;
+            start = end - 7 * 24 * 60 * 60 * 1000; // 7 days
+            limit = 672; // 96 * 7
             break;
           case "30m":
-            start = end - 7 * 24 * 60 * 60 * 1000;
-            limit = 336;
+            start = end - 14 * 24 * 60 * 60 * 1000; // 14 days
+            limit = 672; // 48 * 14
             break;
           case "1h":
-            start = end - 14 * 24 * 60 * 60 * 1000;
-            limit = 336;
+            start = end - 30 * 24 * 60 * 60 * 1000; // 30 days
+            limit = 720; // 24 * 30
             break;
           case "2h":
-            start = end - 30 * 24 * 60 * 60 * 1000;
-            limit = 360;
+            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
+            limit = 720; // 12 * 60
             break;
           case "4h":
-            start = end - 30 * 24 * 60 * 60 * 1000;
-            limit = 180;
+            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
+            limit = 360; // 6 * 60
             break;
           case "12h":
-            start = end - 90 * 24 * 60 * 60 * 1000;
-            limit = 180;
+            start = end - 180 * 24 * 60 * 60 * 1000; // 180 days
+            limit = 360; // 2 * 180
             break;
           case "1d":
-            start = end - 365 * 24 * 60 * 60 * 1000;
-            limit = 365;
+            start = end - 2 * 365 * 24 * 60 * 60 * 1000; // 2 years
+            limit = 730; // 2 * 365
             break;
           case "1w":
-            start = end - 3 * 365 * 24 * 60 * 60 * 1000;
-            limit = 156;
+            start = end - 5 * 365 * 24 * 60 * 60 * 1000; // 5 years
+            limit = 260; // 52 * 5
             break;
           case "1mo":
-            start = end - 5 * 365 * 24 * 60 * 60 * 1000;
-            limit = 60;
+            start = end - 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
+            limit = 120; // 12 * 10
             break;
           default:
-            start = end - 30 * 24 * 60 * 60 * 1000;
+            console.warn(
+              `⚠️ Unknown interval: ${interval}. Defaulting to 60 days.`
+            );
+            start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
             limit = 1000;
         }
 
@@ -689,6 +726,8 @@ export class ChartComponent {
       // Fit content to view
       this.chart.timeScale().fitContent();
 
+      this.initialLoadComplete = true;
+
       return this.data;
     } catch (error) {
       console.error(
@@ -698,6 +737,7 @@ export class ChartComponent {
       throw error;
     } finally {
       this.setLoadingState(false);
+      this.initialLoadInProgress = false;
     }
   }
 

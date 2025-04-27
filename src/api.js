@@ -43,6 +43,15 @@ export class ApiService {
 
     console.log(`💾 Cache MISS for: ${cacheKey}`);
 
+    // Check for overlapping range requests for candles
+    if (endpoint === '/candle' && params.symbol && params.width) {
+      const possibleMatch = this.findOverlappingCandleRequest(params);
+      if (possibleMatch) {
+        console.log(`🔄 Using existing overlapping request for: ${params.symbol}@${params.width}`);
+        return possibleMatch;
+      }
+    }
+
     // Check for in-flight requests
     const requestKey = `${endpoint}:${JSON.stringify(params)}`;
     if (this.pendingRequests.has(requestKey)) {
@@ -105,6 +114,62 @@ export class ApiService {
   }
 
   /**
+   * Find an existing pending request that covers the same data range
+   */
+  findOverlappingCandleRequest(params) {
+    // Only attempt this optimization for candle requests
+    if (!params.symbol || !params.width) return null;
+
+    const targetStart = params.start ? Number(params.start) : 0;
+    const targetEnd = params.end ? Number(params.end) : Date.now();
+
+    // Look through pending requests to find one that encompasses our range
+    for (const [key, promise] of this.pendingRequests.entries()) {
+      if (!key.startsWith('/candle:')) continue;
+
+      try {
+        // Parse the existing request params
+        const existingParams = JSON.parse(key.split(':', 2)[1]);
+        
+        // Only consider requests for the same symbol and width
+        if (existingParams.symbol !== params.symbol || existingParams.width !== params.width) {
+          continue;
+        }
+
+        const existingStart = existingParams.start ? Number(existingParams.start) : 0;
+        const existingEnd = existingParams.end ? Number(existingParams.end) : Date.now();
+        
+        // If the existing request range fully contains our target range
+        // or the existing request has a larger limit that likely covers our needs
+        const containsRange = existingStart <= targetStart && existingEnd >= targetEnd;
+        const largerLimit = !params.limit || (existingParams.limit && existingParams.limit >= params.limit * 1.5);
+        
+        if (containsRange && largerLimit) {
+          console.log(`🔄 Found overlapping candle request that encompasses ${params.symbol}@${params.width}`, {
+            existingRange: {
+              start: new Date(existingStart).toISOString(), 
+              end: new Date(existingEnd).toISOString()
+            },
+            targetRange: {
+              start: new Date(targetStart).toISOString(), 
+              end: new Date(targetEnd).toISOString()
+            },
+            existingLimit: existingParams.limit,
+            targetLimit: params.limit
+          });
+          return promise;
+        }
+      } catch (error) {
+        console.error(`Error parsing existing request key ${key}:`, error);
+        // Skip this entry if we can't parse it
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Fetch historical candle data
    */
   async fetchCandles(symbol, width, options = {}) {
@@ -113,6 +178,14 @@ export class ApiService {
     // Ensure timestamps are integers
     const formattedStart = start ? Math.floor(start) : undefined;
     const formattedEnd = end ? Math.floor(end) : undefined;
+
+    // If start is in future, don't bother with request
+    if (formattedStart && formattedStart > Date.now()) {
+      console.log(
+        `Start time ${new Date(formattedStart).toISOString()} is in the future. No request made.`
+      );
+      return null;
+    }
 
     const params = {
       symbol,
@@ -230,7 +303,6 @@ export class ApiService {
             // Re-subscribe to all active subscriptions
             subscriptions.forEach((sub) => {
               this.ws.send(sub);
-              console.log(`Subscribed to ${sub}`);
             });
 
             resolve(this.ws);
