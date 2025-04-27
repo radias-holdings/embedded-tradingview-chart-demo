@@ -24,7 +24,11 @@ export class AuthService {
    * Check if current token is valid and not near expiry
    */
   isTokenValid() {
-    return this.token && this.tokenExpiry && Date.now() < (this.tokenExpiry - this.refreshThreshold);
+    return (
+      this.token &&
+      this.tokenExpiry &&
+      Date.now() < this.tokenExpiry - this.refreshThreshold
+    );
   }
 
   /**
@@ -33,36 +37,38 @@ export class AuthService {
   async fetchToken() {
     try {
       const { clientId, clientSecret, tokenUrl } = this.config;
-      
+
       const formData = new URLSearchParams();
-      formData.append('grant_type', 'client_credentials');
-      formData.append('client_id', clientId);
-      
-      const authHeader = 'Basic ' + btoa(`${clientId}:${clientSecret}`);
-      
+      formData.append("grant_type", "client_credentials");
+      formData.append("client_id", clientId);
+
+      const authHeader = "Basic " + btoa(`${clientId}:${clientSecret}`);
+
       const response = await fetch(tokenUrl, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Authorization': authHeader,
-          'Content-Type': 'application/x-www-form-urlencoded'
+          Authorization: authHeader,
+          "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: formData
+        body: formData,
       });
-      
+
       if (!response.ok) {
-        throw new Error(`Token request failed: ${response.status} ${response.statusText}`);
+        throw new Error(
+          `Token request failed: ${response.status} ${response.statusText}`
+        );
       }
-      
+
       const data = await response.json();
-      
+
       this.token = data.access_token;
-      this.tokenExpiry = Date.now() + (data.expires_in * 1000);
-      
+      this.tokenExpiry = Date.now() + data.expires_in * 1000;
+
       this.scheduleTokenRefresh();
-      
+
       return this.token;
     } catch (error) {
-      console.error('Error fetching token:', error);
+      console.error("Error fetching token:", error);
       throw error;
     }
   }
@@ -74,16 +80,16 @@ export class AuthService {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
     }
-    
+
     if (!this.token || !this.tokenExpiry) return;
-    
+
     const timeToRefresh = this.tokenExpiry - Date.now() - this.refreshThreshold;
-    
+
     if (timeToRefresh <= 0) {
       this.fetchToken();
       return;
     }
-    
+
     this.refreshTimer = setTimeout(() => this.fetchToken(), timeToRefresh);
   }
 

@@ -1,39 +1,39 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trading Charts</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
     <div class="container">
-        <div class="header">
-            <div class="symbol-selector">
-                <select id="symbol-select">
-                    <option value="BTCUSD">BTCUSD</option>
-                    <option value="ETHUSD">ETHUSD</option>
-                    <option value="AAPL">AAPL</option>
-                    <option value="MSFT">MSFT</option>
-                </select>
-            </div>
-            <div class="interval-selector">
-                <button data-interval="1m">1m</button>
-                <button data-interval="5m">5m</button>
-                <button data-interval="15m">15m</button>
-                <button data-interval="30m">30m</button>
-                <button data-interval="1h">1h</button>
-                <button data-interval="2h">2h</button>
-                <button data-interval="4h">4h</button>
-                <button data-interval="12h">12h</button>
-                <button data-interval="1d" class="active">1d</button>
-                <button data-interval="1w">1w</button>
-                <button data-interval="1mo">1mo</button>
-            </div>
+      <div class="header">
+        <div class="symbol-selector">
+          <select id="symbol-select">
+            <option value="BTCUSD">BTCUSD</option>
+            <option value="ETHUSD">ETHUSD</option>
+            <option value="AAPL">AAPL</option>
+            <option value="MSFT">MSFT</option>
+          </select>
         </div>
-        <div id="chart-container"></div>
-        <div id="tooltip-container" class="tooltip-container"></div>
+        <div class="interval-selector">
+          <button data-interval="1m">1m</button>
+          <button data-interval="5m">5m</button>
+          <button data-interval="15m">15m</button>
+          <button data-interval="30m">30m</button>
+          <button data-interval="1h">1h</button>
+          <button data-interval="2h">2h</button>
+          <button data-interval="4h">4h</button>
+          <button data-interval="12h">12h</button>
+          <button data-interval="1d" class="active">1d</button>
+          <button data-interval="1w">1w</button>
+          <button data-interval="1mo">1mo</button>
+        </div>
+      </div>
+      <div id="chart-container"></div>
+      <div id="tooltip-container" class="tooltip-container"></div>
     </div>
     <script type="module" src="src/main.js"></script>
-</body>
+  </body>
 </html>
