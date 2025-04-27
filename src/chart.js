@@ -4,9 +4,9 @@ import {
   mergeCandles,
   calculateDataRange,
   findNearestTradingDay,
-  calculateSubscriptionRange,
   formatPrice,
   formatDate,
+  parseInterval,
 } from "./utils";
 
 /**
@@ -30,9 +30,24 @@ export class ChartComponent {
     this.realtimeCallback = null;
     this._timeRangeChangeTimeout = null;
     this.tooltipElement = document.getElementById("tooltip-container");
+    
+    this.isInitializing = false;
+    this.timeRangeChangeCooldown = false;
 
     // Data cache
     this.dataCache = new Map();
+    
+    // Backward scroll tracking
+    this.backwardScrollAttempts = 0;
+    this.lastViewportFrom = null;
+    this.maxBackwardScrollAttempts = 3; // After this many attempts, we'll force a load
+    this.historyLoadLimit = new Date().getTime() - (10 * 365 * 24 * 60 * 60 * 1000); // 10 years back max
+    this.reachedHistoryLimit = false;
+    
+    // Track consecutive empty responses for different time ranges
+    this.emptyResponseCounter = 0;
+    this.lastEmptyResponseStart = null;
+    this.maxEmptyResponses = 2; // After this many empty responses, consider it the history limit
 
     this.init();
   }
@@ -87,7 +102,7 @@ export class ChartComponent {
         rightBarStaysOnScroll: true,
         borderVisible: true,
         visible: true,
-        timeFormat: this.getTimeFormatOptions(),
+        timeFormat: "{yyyy}-{MM}-{dd} {HH}:{mm}",
       },
       rightPriceScale: {
         borderColor: "#e0e4e8",
@@ -98,7 +113,7 @@ export class ChartComponent {
         },
       },
       localization: {
-        priceFormatter: this.getPriceFormatter(),
+        priceFormatter: (price) => formatPrice(price, this.symbol),
       },
       handleScroll: {
         vertTouchDrag: true,
@@ -116,30 +131,28 @@ export class ChartComponent {
 
     // Add event listeners
     window.addEventListener("resize", this.handleResize.bind(this));
-    this.chart
-      .timeScale()
-      .subscribeVisibleLogicalRangeChange(
-        this.handleTimeRangeChange.bind(this)
-      );
+    
+    // Only subscribe to time range changes after initialization
+    this._subscribeToTimeRangeChanges();
 
     // Subscribe to crosshair move event for custom tooltip
     this.chart.subscribeCrosshairMove(this.handleCrosshairMove.bind(this));
   }
 
   /**
-   * Get custom price formatter
+   * Subscribe to time range changes
    */
-  getPriceFormatter() {
-    return (price) => {
-      return formatPrice(price, this.symbol);
-    };
+  _subscribeToTimeRangeChanges() {
+    if (!this.chart) return;
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleTimeRangeChange.bind(this));
   }
 
   /**
-   * Get time format options based on interval
+   * Temporarily unsubscribe from time range changes
    */
-  getTimeFormatOptions() {
-    return "{yyyy}-{MM}-{dd} {HH}:{mm}";
+  _unsubscribeFromTimeRangeChanges() {
+    if (!this.chart) return;
+    this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleTimeRangeChange.bind(this));
   }
 
   /**
@@ -195,42 +208,25 @@ export class ChartComponent {
       <div class="tooltip-title">${this.symbol} - ${formattedDate}</div>
       <div class="tooltip-data">
         <div class="tooltip-label">Open:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.open,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.open, this.symbol)}</div>
         
         <div class="tooltip-label">High:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.high,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.high, this.symbol)}</div>
         
         <div class="tooltip-label">Low:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.low,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.low, this.symbol)}</div>
         
         <div class="tooltip-label">Close:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.close,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.close, this.symbol)}</div>
         
         <div class="tooltip-label">Volume:</div>
         <div class="tooltip-value">${formattedVolume}</div>
         
         <div class="tooltip-label">Change:</div>
-        <div class="tooltip-value ${changeClass}">${signChar}${formatPrice(
-      change,
-      this.symbol
-    )}</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${formatPrice(change, this.symbol)}</div>
         
         <div class="tooltip-label">% Change:</div>
-        <div class="tooltip-value ${changeClass}">${signChar}${percentChange.toFixed(
-      2
-    )}%</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${percentChange.toFixed(2)}%</div>
       </div>
     `;
 
@@ -267,7 +263,6 @@ export class ChartComponent {
    */
   findDataPointByTime(time) {
     if (!this.data || !this.data.length) return null;
-
     return this.data.find((candle) => candle.time === time);
   }
 
@@ -276,19 +271,40 @@ export class ChartComponent {
    */
   handleResize() {
     if (!this.chart) return;
-
     const { width, height } = this.container.getBoundingClientRect();
     this.chart.resize(width, height);
+  }
+
+  /**
+   * Check if we should attempt to load more history
+   */
+  shouldAttemptHistoryLoad(currentTime) {
+    // If we've already reached the history limit, don't try again
+    if (this.reachedHistoryLimit) {
+      console.log(`ℹ️ Not attempting history load - already reached history limit`);
+      return false;
+    }
+    
+    const shouldAttempt = currentTime > this.historyLoadLimit;
+    if (!shouldAttempt) {
+      console.log(`ℹ️ Not attempting history load - would exceed maximum history limit of ${new Date(this.historyLoadLimit).toISOString()}`);
+    }
+    return shouldAttempt;
   }
 
   /**
    * Handle time range changes (viewport navigation)
    */
   async handleTimeRangeChange(logicalRange) {
-    if (!this.symbol || !this.interval || !logicalRange || this.isLoading) {
-      console.log(
-        `⏭️ Skipping time range change - no symbol/interval or loading`
-      );
+    // Skip during initialization or cooldown period
+    if (this.isInitializing || this.timeRangeChangeCooldown || this.isLoading) {
+      console.log(`⏭️ Skipping time range change - initialization/cooldown/loading in progress`);
+      return;
+    }
+
+    // If no symbol or interval, skip
+    if (!this.symbol || !this.interval || !logicalRange) {
+      console.log(`⏭️ Skipping time range change - no symbol or interval`);
       return;
     }
 
@@ -308,26 +324,89 @@ export class ChartComponent {
         const { from, to } = visibleRange;
         const fromMs = from * 1000;
         const toMs = to * 1000;
+        
+        // Detect backward scrolling - calculate a significant change threshold
+        // For 1m interval, we need a smaller threshold
+        const intervalMs = parseInterval(this.interval);
+        const scrollThreshold = Math.max(intervalMs * 5, 60000); // At least 5 bars or 1 minute
+        
+        // Only consider it backward scrolling if we moved back by a significant amount
+        const isScrollingBackward = this.lastViewportFrom !== null && 
+                                   (this.lastViewportFrom - fromMs > scrollThreshold);
+        
+        if (isScrollingBackward) {
+          console.log(`📜 Backward scroll detected: ${new Date(fromMs).toISOString()} (moved back ${((this.lastViewportFrom - fromMs)/1000/60).toFixed(1)} minutes)`);
+        }
+        
+        // Track the viewport position
+        this.lastViewportFrom = fromMs;
 
-        // Check if we need to load more data
+        // Check if we need to load more data - only if we're near the edges
         let needsLoading = false;
         let loadStart = fromMs;
         let loadEnd = toMs;
+        let forceLoad = false;
 
         if (this.lastLoadedRange) {
           const { start, end } = this.lastLoadedRange;
-          const buffer = (end - start) * 0.2; // 20% buffer
-
+          
+          // Calculate buffer based on interval - smaller intervals need smaller absolute buffers
+          // Use both percentage and absolute minimum to handle different intervals better
+          const percentBuffer = (end - start) * 0.1; // 10% buffer
+          const minBuffer = Math.max(intervalMs * 10, 300000); // At least 10 bars or 5 minutes
+          const buffer = Math.max(percentBuffer, minBuffer);
+          
           if (fromMs < start + buffer) {
             // Need to load earlier data
             needsLoading = true;
             loadEnd = start;
-            loadStart = fromMs - (end - start) * 0.5; // Load 50% more history
+            // For smaller intervals, request more history proportionally
+            const historyMultiplier = this.interval === '1m' ? 0.5 : 0.3;
+            loadStart = fromMs - (end - start) * historyMultiplier;
+            console.log(`🔄 Need to load earlier data: ${new Date(loadStart).toISOString()} - ${new Date(loadEnd).toISOString()}`);
+            
+            // Reset backward scroll counter since we're loading data
+            this.backwardScrollAttempts = 0;
           } else if (toMs > end - buffer) {
             // Need to load later data
             needsLoading = true;
             loadStart = end;
-            loadEnd = toMs + (toMs - fromMs) * 0.5; // Load 50% more future
+            loadEnd = toMs + (toMs - fromMs) * 0.3; // Load 30% more future
+            console.log(`🔄 Need to load later data: ${new Date(loadStart).toISOString()} - ${new Date(loadEnd).toISOString()}`);
+            
+            // Reset backward scroll counter
+            this.backwardScrollAttempts = 0;
+          } else if (isScrollingBackward) {
+            // We're scrolling backward but not hitting the load threshold
+            this.backwardScrollAttempts++;
+            console.log(`👀 Backward scroll attempt ${this.backwardScrollAttempts}/${this.maxBackwardScrollAttempts}`);
+            
+            if (this.backwardScrollAttempts >= this.maxBackwardScrollAttempts) {
+              // Only attempt to load more history if we haven't reached the limit
+              if (this.shouldAttemptHistoryLoad(start)) {
+                // Force a load with a bigger range if we've been trying to scroll back multiple times
+                needsLoading = true;
+                forceLoad = true;
+                const currentRange = end - start;
+                loadEnd = start;
+                
+                // Adjust the load amount based on interval - smaller intervals need more aggressive loads
+                const forceLoadMultiplier = this.interval === '1m' ? 3 : 2;
+                loadStart = Math.max(start - currentRange * forceLoadMultiplier, this.historyLoadLimit);
+                
+                console.log(`🔄 Forcing load of earlier data after ${this.backwardScrollAttempts} attempts: ${new Date(loadStart).toISOString()} - ${new Date(loadEnd).toISOString()}`);
+              } else {
+                // We've reached our history limit
+                console.log(`⚠️ Reached maximum history limit (${new Date(this.historyLoadLimit).toISOString()}), not loading more data`);
+                this.reachedHistoryLimit = true;
+              }
+              
+              // Reset the counter
+              this.backwardScrollAttempts = 0;
+            }
+          } else {
+            // Reset the counter if we're not scrolling backward
+            this.backwardScrollAttempts = 0;
           }
         } else {
           // No data loaded yet
@@ -343,12 +422,20 @@ export class ChartComponent {
             loadEnd
           );
 
-          await this.loadDataForRange(range.start, range.end, range.limit);
+          // Check if we should load or if we've reached the history limit
+          if (this.shouldAttemptHistoryLoad(range.start) || range.start >= this.lastLoadedRange?.start) {
+            await this.loadDataForRange(range.start, range.end, range.limit, forceLoad);
+          } else {
+            console.log(`⚠️ Not loading more data, reached history limit or no more data available`);
+            this.reachedHistoryLimit = true;
+          }
+        } else {
+          console.log(`✅ No additional data needed for current view`);
         }
       } catch (error) {
         console.error("Error handling time range change:", error);
       }
-    }, 300); // 300ms debounce
+    }, 500); // 500ms debounce
   }
 
   /**
@@ -370,13 +457,51 @@ export class ChartComponent {
   }
 
   /**
+   * Check if requested range overlaps with already loaded data
+   */
+  isRangeAlreadyLoaded(start, end) {
+    if (!this.lastLoadedRange || !this.data.length) return false;
+    
+    // Allow for some buffer at the edges - adjust based on interval
+    const intervalMs = parseInterval(this.interval);
+    const buffer = Math.min(
+      Math.max(intervalMs * 20, 300000), // At least 20 candles or 5 minutes
+      24 * 60 * 60 * 1000 // Maximum 1 day buffer
+    );
+    
+    const loadedStart = this.lastLoadedRange.start - buffer;
+    const loadedEnd = this.lastLoadedRange.end + buffer;
+    
+    const isLoaded = start >= loadedStart && end <= loadedEnd;
+    
+    return isLoaded;
+  }
+
+  /**
    * Load data for a specific time range
    */
-  async loadDataForRange(start, end, limit) {
+  async loadDataForRange(start, end, limit, forceLoad = false) {
     // If already loading, return the existing promise
     if (this.loadingPromise) {
       console.log(`⏭️ Skipping loadDataForRange - already loading data`);
       return this.loadingPromise;
+    }
+
+    // For very small intervals, make sure we're not requesting too much data at once
+    if (this.interval === '1m') {
+      const requestDuration = end - start;
+      const maxDuration = 7 * 24 * 60 * 60 * 1000; // 7 days for 1m interval
+      
+      if (requestDuration > maxDuration && !forceLoad) {
+        console.log(`⚠️ Request duration too long for 1m interval (${(requestDuration/1000/60/60/24).toFixed(1)} days), limiting to ${(maxDuration/1000/60/60/24).toFixed(1)} days`);
+        start = end - maxDuration;
+      }
+    }
+
+    // Check if the requested range is already covered by loaded data
+    if (!forceLoad && this.isRangeAlreadyLoaded(start, end)) {
+      console.log(`✅ Requested range already loaded: ${new Date(start).toISOString()} - ${new Date(end).toISOString()}`);
+      return Promise.resolve(this.data);
     }
 
     console.log(`📈 Loading data: ${this.symbol}@${this.interval}`, {
@@ -384,6 +509,7 @@ export class ChartComponent {
         start: new Date(start).toISOString(),
         end: new Date(end).toISOString(),
       },
+      forceLoad,
       limit,
     });
 
@@ -394,45 +520,28 @@ export class ChartComponent {
         // Fetch instrument data if not available
         if (!this.instrumentData) {
           try {
-            this.instrumentData = await this.apiService.fetchInstrument(
-              this.symbol
-            );
+            this.instrumentData = await this.apiService.fetchInstrument(this.symbol);
             console.log(`📌 Instrument data: ${this.symbol}`, {
               category: this.instrumentData.category,
-              hasTradingHours: !!(
-                this.instrumentData.market &&
-                this.instrumentData.market.length > 0
-              ),
+              hasTradingHours: !!(this.instrumentData.market && this.instrumentData.market.length > 0),
             });
           } catch (error) {
             console.warn("Could not fetch instrument data:", error.message);
           }
-        } else {
-          console.log(`📌 Using cached instrument data: ${this.symbol}`, {
-            category: this.instrumentData.category,
-            hasTradingHours: !!(
-              this.instrumentData.market &&
-              this.instrumentData.market.length > 0
-            ),
-          });
         }
 
         // For instruments with limited trading hours, adjust the start time
         let adjustedStart = start;
         if (this.instrumentData && this.instrumentData.category !== "Crypto") {
           const originalStart = new Date(start).toISOString();
-          adjustedStart = findNearestTradingDay(
-            this.instrumentData,
-            adjustedStart
-          );
-
+          adjustedStart = findNearestTradingDay(this.instrumentData, adjustedStart);
+          
           if (adjustedStart !== start) {
+            const dayDiff = Math.round((start - adjustedStart) / (1000 * 60 * 60 * 24));
             console.log(`⏱️ Adjusted start time for ${this.symbol}`, {
               original: originalStart,
               adjusted: new Date(adjustedStart).toISOString(),
-              difference: `${Math.round(
-                (start - adjustedStart) / (1000 * 60 * 60 * 24)
-              )} days`,
+              difference: `${dayDiff} days`,
             });
           }
         }
@@ -455,31 +564,71 @@ export class ChartComponent {
             count: candles.length,
             firstCandle: new Date(firstCandle.timestamp).toISOString(),
             lastCandle: new Date(lastCandle.timestamp).toISOString(),
-            requestedStart: new Date(adjustedStart).toISOString(),
-            requestedEnd: new Date(end).toISOString(),
           });
+
+          // Reset empty response counter since we got data
+          this.emptyResponseCounter = 0;
+          this.lastEmptyResponseStart = null;
 
           const formattedCandles = formatCandleData(candles);
           this.data = mergeCandles(this.data, formattedCandles);
 
           this.updateSeries();
 
-          // Update loaded range
-          this.lastLoadedRange = {
-            start: Math.min(
-              adjustedStart,
-              this.lastLoadedRange?.start || Infinity
-            ),
-            end: Math.max(end, this.lastLoadedRange?.end || 0),
-          };
-        } else {
-          console.warn(
-            `⚠️ No candles received: ${this.symbol}@${this.interval}`,
-            {
-              start: new Date(adjustedStart).toISOString(),
-              end: new Date(end).toISOString(),
+          // Update loaded range - check if we got enough data to move the range
+          if (this.lastLoadedRange) {
+            // If we forced a load and got very little data at the beginning, we may have reached the limit
+            if (forceLoad && candles.length < limit * 0.1 && adjustedStart < this.lastLoadedRange.start) {
+              console.log(`⚠️ Received very little data (${candles.length} candles) when forcing load, may have reached history limit`);
+              this.reachedHistoryLimit = true;
+              
+              // Show a more accurate history limit based on the earliest data we have
+              if (this.data.length > 0) {
+                const earliestCandle = this.data.reduce((earliest, candle) => 
+                  candle.time < earliest.time ? candle : earliest, this.data[0]);
+                console.log(`📅 Setting history limit to earliest available data: ${new Date(earliestCandle.time * 1000).toISOString()}`);
+              }
             }
-          );
+            
+            this.lastLoadedRange = {
+              start: Math.min(adjustedStart, this.lastLoadedRange.start),
+              end: Math.max(end, this.lastLoadedRange.end),
+            };
+          } else {
+            this.lastLoadedRange = {
+              start: adjustedStart,
+              end: end,
+            };
+          }
+          
+          console.log(`📊 Updated data range: ${new Date(this.lastLoadedRange.start).toISOString()} - ${new Date(this.lastLoadedRange.end).toISOString()}`);
+        } else {
+          console.warn(`⚠️ No candles received: ${this.symbol}@${this.interval}`, {
+            start: new Date(adjustedStart).toISOString(),
+            end: new Date(end).toISOString(),
+          });
+          
+          // Track consecutive empty responses
+          if (this.lastEmptyResponseStart === null || adjustedStart < this.lastEmptyResponseStart) {
+            this.emptyResponseCounter++;
+            this.lastEmptyResponseStart = adjustedStart;
+            console.log(`⚠️ Empty response counter: ${this.emptyResponseCounter}/${this.maxEmptyResponses}`);
+          }
+          
+          // If we have multiple consecutive empty responses for earlier time ranges
+          // or if we forced a load and got no data, we've likely reached the limit
+          if ((this.emptyResponseCounter >= this.maxEmptyResponses) || 
+              (forceLoad && start < this.lastLoadedRange.start)) {
+            console.log(`⚠️ No data found when requesting earlier history, setting history limit to current earliest data`);
+            this.reachedHistoryLimit = true;
+            
+            // Update the history limit to the earliest data we have
+            if (this.data.length > 0) {
+              const earliestCandle = this.data.reduce((earliest, candle) => 
+                candle.time < earliest.time ? candle : earliest, this.data[0]);
+              console.log(`📅 Setting history limit to earliest available data: ${new Date(earliestCandle.time * 1000).toISOString()}`);
+            }
+          }
         }
 
         return this.data;
@@ -494,31 +643,89 @@ export class ChartComponent {
 
     return this.loadingPromise;
   }
+
   /**
    * Update chart series with current data
    */
   updateSeries() {
     if (!this.data || !this.candleSeries || this.data.length === 0) return;
-
-    // Update candlestick series
     this.candleSeries.setData(this.data);
+  }
+
+  /**
+   * Calculate optimal load range based on interval
+   */
+  calculateInitialLoadRange(interval) {
+    const end = Date.now();
+    let start, limit;
+
+    // Comprehensive initial data load to prevent multiple requests
+    switch (interval) {
+      case "1m":
+        start = end - 24 * 60 * 60 * 1000; // 24 hours
+        limit = 1440; // 1440 minutes in a day
+        break;
+      case "5m":
+        start = end - 3 * 24 * 60 * 60 * 1000; // 3 days
+        limit = 864; // 3 * 288 intervals
+        break;
+      case "15m":
+        start = end - 7 * 24 * 60 * 60 * 1000; // 7 days
+        limit = 672; // 96 * 7 intervals
+        break;
+      case "30m":
+        start = end - 14 * 24 * 60 * 60 * 1000; // 14 days
+        limit = 672; // 48 * 14 intervals
+        break;
+      case "1h":
+        start = end - 30 * 24 * 60 * 60 * 1000; // 30 days
+        limit = 720; // 24 * 30 intervals
+        break;
+      case "2h":
+        start = end - 60 * 24 * 60 * 60 * 1000; // 60 days
+        limit = 720; // 12 * 60 intervals
+        break;
+      case "4h":
+        start = end - 90 * 24 * 60 * 60 * 1000; // 90 days
+        limit = 540; // 6 * 90 intervals
+        break;
+      case "12h":
+        start = end - 180 * 24 * 60 * 60 * 1000; // 180 days
+        limit = 360; // 2 * 180 intervals
+        break;
+      case "1d":
+        start = end - 1 * 365 * 24 * 60 * 60 * 1000; // 1 year
+        limit = 365;
+        break;
+      case "1w":
+        start = end - 5 * 365 * 24 * 60 * 60 * 1000; // 5 years
+        limit = 260; // 52 * 5 weeks
+        break;
+      case "1mo":
+        start = end - 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
+        limit = 120; // 12 * 10 months
+        break;
+      default:
+        console.warn(`⚠️ Unknown interval: ${interval}, defaulting to 1 year`);
+        start = end - 365 * 24 * 60 * 60 * 1000; // 1 year
+        limit = 1000;
+    }
+
+    return { start, end, limit };
   }
 
   /**
    * Load symbol and interval
    */
   async loadSymbol(symbol, interval) {
-    if (
-      this.symbol === symbol &&
-      this.interval === interval &&
-      this.isLoading
-    ) {
-      console.log(
-        `⏭️ Skipping loadSymbol - already loading same symbol/interval`
-      );
+    if (this.symbol === symbol && this.interval === interval && this.isLoading) {
+      console.log(`⏭️ Skipping loadSymbol - already loading same symbol/interval`);
       return;
     }
 
+    // Set initialization flags and disable time range change events
+    this.isInitializing = true;
+    this._unsubscribeFromTimeRangeChanges();
     this.setLoadingState(true);
 
     try {
@@ -533,9 +740,7 @@ export class ChartComponent {
       }
 
       // Cache current data if any
-      const currentKey =
-        this.symbol && this.interval ? `${this.symbol}:${this.interval}` : null;
-
+      const currentKey = this.symbol && this.interval ? `${this.symbol}:${this.interval}` : null;
       if (currentKey && this.data.length > 0) {
         this.dataCache.set(currentKey, {
           data: [...this.data],
@@ -547,6 +752,11 @@ export class ChartComponent {
       // Set new symbol/interval
       this.symbol = symbol;
       this.interval = interval;
+      
+      // Reset backward scroll tracking and history limits
+      this.backwardScrollAttempts = 0;
+      this.lastViewportFrom = null;
+      this.reachedHistoryLimit = false;
 
       // Check cache for new symbol/interval
       const newKey = `${symbol}:${interval}`;
@@ -557,9 +767,7 @@ export class ChartComponent {
 
         // Use cached data
         this.data = [...cachedData.data];
-        this.lastLoadedRange = cachedData.range
-          ? { ...cachedData.range }
-          : null;
+        this.lastLoadedRange = cachedData.range ? { ...cachedData.range } : null;
         this.instrumentData = cachedData.instrumentData;
         this.updateSeries();
       } else {
@@ -570,80 +778,22 @@ export class ChartComponent {
         this.lastLoadedRange = null;
         this.instrumentData = null;
 
-        // Calculate optimal range based on interval
-        const end = Date.now();
-        let start, limit;
+        // Get optimal data range for initial load
+        const { start, end, limit } = this.calculateInitialLoadRange(interval);
 
-        switch (interval) {
-          case "1m":
-            start = end - 12 * 60 * 60 * 1000;
-            limit = 720;
-            break;
-          case "5m":
-            start = end - 24 * 60 * 60 * 1000;
-            limit = 288;
-            break;
-          case "15m":
-            start = end - 3 * 24 * 60 * 60 * 1000;
-            limit = 288;
-            break;
-          case "30m":
-            start = end - 7 * 24 * 60 * 60 * 1000;
-            limit = 336;
-            break;
-          case "1h":
-            start = end - 14 * 24 * 60 * 60 * 1000;
-            limit = 336;
-            break;
-          case "2h":
-            start = end - 30 * 24 * 60 * 60 * 1000;
-            limit = 360;
-            break;
-          case "4h":
-            start = end - 30 * 24 * 60 * 60 * 1000;
-            limit = 180;
-            break;
-          case "12h":
-            start = end - 90 * 24 * 60 * 60 * 1000;
-            limit = 180;
-            break;
-          case "1d":
-            start = end - 365 * 24 * 60 * 60 * 1000;
-            limit = 365;
-            break;
-          case "1w":
-            start = end - 3 * 365 * 24 * 60 * 60 * 1000;
-            limit = 156;
-            break;
-          case "1mo":
-            start = end - 5 * 365 * 24 * 60 * 60 * 1000;
-            limit = 60;
-            break;
-          default:
-            start = end - 30 * 24 * 60 * 60 * 1000;
-            limit = 1000;
-        }
-
-        // Fetch instrument data and initial candles
+        // Fetch instrument data first
         try {
           this.instrumentData = await this.apiService.fetchInstrument(symbol);
-
-          // Adjust start time for non-crypto instruments
-          if (
-            this.instrumentData &&
-            this.instrumentData.category !== "Crypto"
-          ) {
-            start = findNearestTradingDay(this.instrumentData, start);
-          }
         } catch (error) {
           console.warn("Could not fetch instrument data:", error.message);
           // Continue without instrument data
         }
 
+        // Single comprehensive data load
         await this.loadDataForRange(start, end, limit);
       }
 
-      // Set up realtime subscription (only once per symbol/interval)
+      // Set up realtime subscription
       this.realtimeCallback = (candle) => {
         // Convert to chart format
         const timestamp = Math.floor(candle.timestamp / 1000);
@@ -654,7 +804,7 @@ export class ChartComponent {
           high: candle.high,
           low: candle.low,
           close: candle.close,
-          volume: candle.volume || 0, // Keep volume for the tooltip
+          volume: candle.volume || 0,
         };
 
         // Update or add to data array
@@ -691,13 +841,20 @@ export class ChartComponent {
 
       return this.data;
     } catch (error) {
-      console.error(
-        `Error loading symbol ${symbol} with interval ${interval}:`,
-        error
-      );
+      console.error(`Error loading symbol ${symbol} with interval ${interval}:`, error);
       throw error;
     } finally {
       this.setLoadingState(false);
+      
+      // Prevent immediate follow-up requests by setting a cooldown period
+      this.timeRangeChangeCooldown = true;
+      setTimeout(() => {
+        // Re-enable time range changes after initialization complete
+        this.isInitializing = false;
+        this.timeRangeChangeCooldown = false;
+        this._subscribeToTimeRangeChanges();
+        console.log("✅ Chart initialization complete, time range change handling enabled");
+      }, 1000); // 1 second cooldown before allowing new requests
     }
   }
 
@@ -706,7 +863,6 @@ export class ChartComponent {
    */
   async changeInterval(interval) {
     if (this.interval === interval || !this.symbol) return;
-
     return this.loadSymbol(this.symbol, interval);
   }
 

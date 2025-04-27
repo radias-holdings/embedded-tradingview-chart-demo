@@ -11,6 +11,7 @@ export class ApiService {
     // Cache management
     this.cache = new Map();
     this.pendingRequests = new Map();
+    this.cachedRanges = new Map();
 
     // WebSocket state
     this.ws = null;
@@ -32,20 +33,88 @@ export class ApiService {
   }
 
   /**
+   * Store range info for data in cache
+   */
+  _storeCachedRange(symbol, width, start, end) {
+    const key = `${symbol}:${width}`;
+    const ranges = this.cachedRanges.get(key) || [];
+    
+    // Add the new range
+    ranges.push({ start, end });
+    
+    // Merge overlapping ranges
+    if (ranges.length > 1) {
+      ranges.sort((a, b) => a.start - b.start);
+      
+      const mergedRanges = [ranges[0]];
+      
+      for (let i = 1; i < ranges.length; i++) {
+        const currentRange = ranges[i];
+        const lastMerged = mergedRanges[mergedRanges.length - 1];
+        
+        if (currentRange.start <= lastMerged.end) {
+          // Ranges overlap, extend the previous range
+          lastMerged.end = Math.max(lastMerged.end, currentRange.end);
+        } else {
+          // No overlap, add as new range
+          mergedRanges.push(currentRange);
+        }
+      }
+      
+      this.cachedRanges.set(key, mergedRanges);
+    } else {
+      this.cachedRanges.set(key, ranges);
+    }
+  }
+
+  /**
+   * Check if a range is already in cache
+   */
+  _isRangeInCache(symbol, width, start, end) {
+    const key = `${symbol}:${width}`;
+    const ranges = this.cachedRanges.get(key);
+    
+    if (!ranges || ranges.length === 0) return false;
+    
+    // Check if any cached range fully contains the requested range
+    return ranges.some(range => range.start <= start && range.end >= end);
+  }
+
+  /**
    * Fetch data with caching and request deduplication
    */
   async fetchWithCache(endpoint, params, cacheKey) {
-    // Check cache first
-    if (this.cache.has(cacheKey)) {
-      console.log(`💾 Cache HIT for: ${cacheKey}`);
-      return this.cache.get(cacheKey);
+    // For candle requests, check if range is already in cache
+    if (endpoint === '/candle' && params.symbol && params.width && 
+        params.start && params.end) {
+      
+      if (this._isRangeInCache(params.symbol, params.width, params.start, params.end)) {
+        console.log(`💾 Range already in cache for: ${params.symbol}@${params.width}`);
+        // Find the cached data
+        const possibleCache = Array.from(this.cache.entries())
+          .filter(([key, _]) => key.startsWith(`candles:${params.symbol}:${params.width}:`))
+          .sort((a, b) => b[1].length - a[1].length) // Sort by data length (most data first)
+          .map(([_, value]) => value)[0];
+          
+        if (possibleCache) {
+          console.log(`🔍 Using existing cached data for range: ${new Date(params.start).toISOString()} - ${new Date(params.end).toISOString()}`);
+          return possibleCache;
+        }
+      }
     }
 
-    console.log(`💾 Cache MISS for: ${cacheKey}`);
-
-    // Check for in-flight requests
+    // Check for in-flight requests with overlapping ranges
     const requestKey = `${endpoint}:${JSON.stringify(params)}`;
-    if (this.pendingRequests.has(requestKey)) {
+    
+    if (endpoint === '/candle' && params.symbol && params.width) {
+      // Look for an existing request that might satisfy this one
+      const pendingRequest = this._findOverlappingRequest(params);
+      if (pendingRequest) {
+        console.log(`⏳ Using existing in-flight request with overlapping range for: ${params.symbol}@${params.width}`);
+        return pendingRequest;
+      }
+    } else if (this.pendingRequests.has(requestKey)) {
+      // For non-candle requests, check for exact matches
       console.log(`⏳ Using in-flight request for: ${requestKey}`);
       return this.pendingRequests.get(requestKey);
     }
@@ -85,6 +154,12 @@ export class ApiService {
         if (data && (Array.isArray(data) ? data.length > 0 : true)) {
           this.cache.set(cacheKey, data);
 
+          // For candle data, store range info
+          if (endpoint === '/candle' && params.symbol && params.width && 
+              params.start && params.end && Array.isArray(data) && data.length > 0) {
+            this._storeCachedRange(params.symbol, params.width, Number(params.start), Number(params.end));
+          }
+
           // Limit cache size
           if (this.cache.size > 100) {
             const firstKey = this.cache.keys().next().value;
@@ -105,6 +180,58 @@ export class ApiService {
   }
 
   /**
+   * Find an existing pending request that covers the same data range
+   */
+  _findOverlappingRequest(params) {
+    const targetStart = params.start ? Number(params.start) : 0;
+    const targetEnd = params.end ? Number(params.end) : Date.now();
+    const targetSymbol = params.symbol;
+    const targetWidth = params.width;
+
+    // Check all pending requests
+    for (const [key, promise] of this.pendingRequests.entries()) {
+      if (!key.startsWith('/candle:')) continue;
+
+      try {
+        // Parse existing request params
+        const existingParams = JSON.parse(key.split(':', 2)[1]);
+        
+        // Only consider requests for the same symbol and width
+        if (existingParams.symbol !== targetSymbol || existingParams.width !== targetWidth) {
+          continue;
+        }
+
+        const existingStart = existingParams.start ? Number(existingParams.start) : 0;
+        const existingEnd = existingParams.end ? Number(existingParams.end) : Date.now();
+        
+        // Ranges overlap if one contains the other or they partially overlap with significant coverage
+        const rangeContained = (existingStart <= targetStart && existingEnd >= targetEnd);
+        const rangesOverlap = (existingStart <= targetEnd && existingEnd >= targetStart);
+        
+        const overlapRatio = rangesOverlap ? 
+          (Math.min(targetEnd, existingEnd) - Math.max(targetStart, existingStart)) / 
+          (targetEnd - targetStart) : 0;
+        
+        // Use the request if it contains our range or has significant overlap (>70%)
+        if (rangeContained || overlapRatio > 0.7) {
+          console.log(`🔄 Found overlapping request for ${targetSymbol}@${targetWidth}`, {
+            existing: `${new Date(existingStart).toISOString()} - ${new Date(existingEnd).toISOString()}`,
+            requested: `${new Date(targetStart).toISOString()} - ${new Date(targetEnd).toISOString()}`,
+            overlapRatio: overlapRatio.toFixed(2)
+          });
+          return promise;
+        }
+      } catch (error) {
+        // Skip if we can't parse the key
+        console.error(`Error parsing key ${key}:`, error);
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Fetch historical candle data
    */
   async fetchCandles(symbol, width, options = {}) {
@@ -113,6 +240,12 @@ export class ApiService {
     // Ensure timestamps are integers
     const formattedStart = start ? Math.floor(start) : undefined;
     const formattedEnd = end ? Math.floor(end) : undefined;
+
+    // If start is in future, don't bother with request
+    if (formattedStart && formattedStart > Date.now()) {
+      console.log(`⚠️ Start time ${new Date(formattedStart).toISOString()} is in the future. No request made.`);
+      return [];
+    }
 
     const params = {
       symbol,
@@ -124,16 +257,12 @@ export class ApiService {
     };
 
     console.log(`📊 API Request: ${symbol}@${width}`, {
-      start: formattedStart
-        ? new Date(formattedStart).toISOString()
-        : "undefined",
+      start: formattedStart ? new Date(formattedStart).toISOString() : "undefined",
       end: formattedEnd ? new Date(formattedEnd).toISOString() : "undefined",
       limit: limit || "no limit",
     });
 
-    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${
-      formattedEnd || "end"
-    }:${limit || "nolimit"}`;
+    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${formattedEnd || "end"}:${limit || "nolimit"}`;
 
     return this.fetchWithCache("/candle", params, cacheKey);
   }
@@ -156,9 +285,7 @@ export class ApiService {
       });
 
       if (!response.ok) {
-        throw new Error(
-          `API request failed: ${response.status} ${response.statusText}`
-        );
+        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
       }
 
       const data = await response.json();
@@ -214,7 +341,7 @@ export class ApiService {
       const wsUrlWithParams = `${this.wsBaseUrl}/candle${
         queryParams.toString() ? `?${queryParams.toString()}` : ""
       }`;
-      console.log(`Connecting to WebSocket: ${wsUrlWithParams}`);
+      console.log(`🔌 Connecting to WebSocket: ${wsUrlWithParams}`);
 
       return new Promise((resolve, reject) => {
         try {
@@ -222,7 +349,7 @@ export class ApiService {
 
           // Set up connection handler
           this.ws.onopen = () => {
-            console.log("WebSocket connection opened");
+            console.log("✅ WebSocket connection opened");
 
             this.reconnectAttempts = 0;
             this.wsConnecting = false;
@@ -230,7 +357,6 @@ export class ApiService {
             // Re-subscribe to all active subscriptions
             subscriptions.forEach((sub) => {
               this.ws.send(sub);
-              console.log(`Subscribed to ${sub}`);
             });
 
             resolve(this.ws);
@@ -240,47 +366,39 @@ export class ApiService {
             // Handle ping messages
             if (event.data === "ping") {
               this.ws.send("pong");
-              console.log("Received ping, sent pong");
+              console.log("📡 Received ping, sent pong");
               return;
             }
 
             try {
               const data = JSON.parse(event.data);
-              console.log("Received WebSocket message:", data);
+              console.log("📡 WebSocket message received:", data);
               this.handleWebSocketMessage(data);
             } catch (error) {
-              console.error(
-                "Error processing WebSocket message:",
-                error,
-                "Raw data:",
-                event.data
-              );
+              console.error("❌ Error processing WebSocket message:", error);
             }
           };
 
           this.ws.onerror = (error) => {
-            console.error("WebSocket error:", error);
+            console.error("❌ WebSocket error:", error);
             this.wsConnecting = false;
             reject(error);
           };
 
           this.ws.onclose = (event) => {
-            console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
+            console.log(`⚠️ WebSocket closed: ${event.code} - ${event.reason}`);
             this.ws = null;
             this.wsConnecting = false;
 
             // Attempt reconnection
             if (this.reconnectAttempts < this.maxReconnectAttempts) {
               this.reconnectAttempts++;
-              const delay = Math.min(
-                1000 * Math.pow(2, this.reconnectAttempts),
-                30000
-              );
+              const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
 
-              console.log(`Will attempt to reconnect in ${delay}ms`);
+              console.log(`🔄 Will attempt to reconnect in ${delay}ms`);
               setTimeout(() => {
                 this.connectWebSocket().catch((err) => {
-                  console.error("WebSocket reconnection failed:", err);
+                  console.error("❌ WebSocket reconnection failed:", err);
                 });
               }, delay);
             }
@@ -310,7 +428,7 @@ export class ApiService {
         try {
           callback(data);
         } catch (error) {
-          console.error(`Error in WebSocket callback for ${key}:`, error);
+          console.error(`❌ Error in WebSocket callback for ${key}:`, error);
         }
       });
     }
@@ -337,10 +455,10 @@ export class ApiService {
       // Send subscription message
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(key);
-        console.log(`Subscribed to ${key}`);
+        console.log(`📡 Subscribed to ${key}`);
       }
     } catch (error) {
-      console.error("Failed to subscribe to WebSocket:", error);
+      console.error("❌ Failed to subscribe to WebSocket:", error);
     }
   }
 
@@ -367,7 +485,7 @@ export class ApiService {
     // Send unsubscribe message if connected
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(`-${key}`);
-      console.log(`Unsubscribed from ${key}`);
+      console.log(`📡 Unsubscribed from ${key}`);
     }
   }
 
@@ -383,6 +501,7 @@ export class ApiService {
     this.subscriptions.clear();
     this.pendingRequests.clear();
     this.cache.clear();
+    this.cachedRanges.clear();
   }
 }
 
