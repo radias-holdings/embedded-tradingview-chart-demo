@@ -103,7 +103,6 @@ export class ApiService {
       }
     }
 
-
     // Check for in-flight requests with overlapping ranges
     const requestKey = `${endpoint}:${JSON.stringify(params)}`;
     
@@ -205,23 +204,20 @@ export class ApiService {
         const existingStart = existingParams.start ? Number(existingParams.start) : 0;
         const existingEnd = existingParams.end ? Number(existingParams.end) : Date.now();
         
-        // Ranges overlap if one contains the other
-        const rangeContained = (existingStart <= targetStart && existingEnd >= targetEnd) ||
-                              (targetStart <= existingStart && targetEnd >= existingEnd);
-                              
-        // Or if they partially overlap
+        // Ranges overlap if one contains the other or they partially overlap with significant coverage
+        const rangeContained = (existingStart <= targetStart && existingEnd >= targetEnd);
         const rangesOverlap = (existingStart <= targetEnd && existingEnd >= targetStart);
         
-        // Use the request if it contains our range or has significant overlap
-        const significantOverlap = rangeContained || 
-                                  (rangesOverlap && 
-                                   (Math.min(targetEnd, existingEnd) - Math.max(targetStart, existingStart)) / 
-                                   (targetEnd - targetStart) > 0.7);
-
-        if (significantOverlap) {
+        const overlapRatio = rangesOverlap ? 
+          (Math.min(targetEnd, existingEnd) - Math.max(targetStart, existingStart)) / 
+          (targetEnd - targetStart) : 0;
+        
+        // Use the request if it contains our range or has significant overlap (>70%)
+        if (rangeContained || overlapRatio > 0.7) {
           console.log(`🔄 Found overlapping request for ${targetSymbol}@${targetWidth}`, {
             existing: `${new Date(existingStart).toISOString()} - ${new Date(existingEnd).toISOString()}`,
-            requested: `${new Date(targetStart).toISOString()} - ${new Date(targetEnd).toISOString()}`
+            requested: `${new Date(targetStart).toISOString()} - ${new Date(targetEnd).toISOString()}`,
+            overlapRatio: overlapRatio.toFixed(2)
           });
           return promise;
         }
@@ -247,10 +243,8 @@ export class ApiService {
 
     // If start is in future, don't bother with request
     if (formattedStart && formattedStart > Date.now()) {
-      console.log(
-        `Start time ${new Date(formattedStart).toISOString()} is in the future. No request made.`
-      );
-      return null;
+      console.log(`⚠️ Start time ${new Date(formattedStart).toISOString()} is in the future. No request made.`);
+      return [];
     }
 
     const params = {
@@ -263,16 +257,12 @@ export class ApiService {
     };
 
     console.log(`📊 API Request: ${symbol}@${width}`, {
-      start: formattedStart
-        ? new Date(formattedStart).toISOString()
-        : "undefined",
+      start: formattedStart ? new Date(formattedStart).toISOString() : "undefined",
       end: formattedEnd ? new Date(formattedEnd).toISOString() : "undefined",
       limit: limit || "no limit",
     });
 
-    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${
-      formattedEnd || "end"
-    }:${limit || "nolimit"}`;
+    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${formattedEnd || "end"}:${limit || "nolimit"}`;
 
     return this.fetchWithCache("/candle", params, cacheKey);
   }
@@ -295,9 +285,7 @@ export class ApiService {
       });
 
       if (!response.ok) {
-        throw new Error(
-          `API request failed: ${response.status} ${response.statusText}`
-        );
+        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
       }
 
       const data = await response.json();
@@ -353,7 +341,7 @@ export class ApiService {
       const wsUrlWithParams = `${this.wsBaseUrl}/candle${
         queryParams.toString() ? `?${queryParams.toString()}` : ""
       }`;
-      console.log(`Connecting to WebSocket: ${wsUrlWithParams}`);
+      console.log(`🔌 Connecting to WebSocket: ${wsUrlWithParams}`);
 
       return new Promise((resolve, reject) => {
         try {
@@ -361,7 +349,7 @@ export class ApiService {
 
           // Set up connection handler
           this.ws.onopen = () => {
-            console.log("WebSocket connection opened");
+            console.log("✅ WebSocket connection opened");
 
             this.reconnectAttempts = 0;
             this.wsConnecting = false;
@@ -378,47 +366,39 @@ export class ApiService {
             // Handle ping messages
             if (event.data === "ping") {
               this.ws.send("pong");
-              console.log("Received ping, sent pong");
+              console.log("📡 Received ping, sent pong");
               return;
             }
 
             try {
               const data = JSON.parse(event.data);
-              console.log("Received WebSocket message:", data);
+              console.log("📡 WebSocket message received:", data);
               this.handleWebSocketMessage(data);
             } catch (error) {
-              console.error(
-                "Error processing WebSocket message:",
-                error,
-                "Raw data:",
-                event.data
-              );
+              console.error("❌ Error processing WebSocket message:", error);
             }
           };
 
           this.ws.onerror = (error) => {
-            console.error("WebSocket error:", error);
+            console.error("❌ WebSocket error:", error);
             this.wsConnecting = false;
             reject(error);
           };
 
           this.ws.onclose = (event) => {
-            console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
+            console.log(`⚠️ WebSocket closed: ${event.code} - ${event.reason}`);
             this.ws = null;
             this.wsConnecting = false;
 
             // Attempt reconnection
             if (this.reconnectAttempts < this.maxReconnectAttempts) {
               this.reconnectAttempts++;
-              const delay = Math.min(
-                1000 * Math.pow(2, this.reconnectAttempts),
-                30000
-              );
+              const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
 
-              console.log(`Will attempt to reconnect in ${delay}ms`);
+              console.log(`🔄 Will attempt to reconnect in ${delay}ms`);
               setTimeout(() => {
                 this.connectWebSocket().catch((err) => {
-                  console.error("WebSocket reconnection failed:", err);
+                  console.error("❌ WebSocket reconnection failed:", err);
                 });
               }, delay);
             }
@@ -448,7 +428,7 @@ export class ApiService {
         try {
           callback(data);
         } catch (error) {
-          console.error(`Error in WebSocket callback for ${key}:`, error);
+          console.error(`❌ Error in WebSocket callback for ${key}:`, error);
         }
       });
     }
@@ -475,10 +455,10 @@ export class ApiService {
       // Send subscription message
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(key);
-        console.log(`Subscribed to ${key}`);
+        console.log(`📡 Subscribed to ${key}`);
       }
     } catch (error) {
-      console.error("Failed to subscribe to WebSocket:", error);
+      console.error("❌ Failed to subscribe to WebSocket:", error);
     }
   }
 
@@ -505,7 +485,7 @@ export class ApiService {
     // Send unsubscribe message if connected
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(`-${key}`);
-      console.log(`Unsubscribed from ${key}`);
+      console.log(`📡 Unsubscribed from ${key}`);
     }
   }
 

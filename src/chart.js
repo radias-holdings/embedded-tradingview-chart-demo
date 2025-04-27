@@ -4,7 +4,6 @@ import {
   mergeCandles,
   calculateDataRange,
   findNearestTradingDay,
-  calculateSubscriptionRange,
   formatPrice,
   formatDate,
 } from "./utils";
@@ -90,7 +89,7 @@ export class ChartComponent {
         rightBarStaysOnScroll: true,
         borderVisible: true,
         visible: true,
-        timeFormat: this.getTimeFormatOptions(),
+        timeFormat: "{yyyy}-{MM}-{dd} {HH}:{mm}",
       },
       rightPriceScale: {
         borderColor: "#e0e4e8",
@@ -101,7 +100,7 @@ export class ChartComponent {
         },
       },
       localization: {
-        priceFormatter: this.getPriceFormatter(),
+        priceFormatter: (price) => formatPrice(price, this.symbol),
       },
       handleScroll: {
         vertTouchDrag: true,
@@ -132,12 +131,7 @@ export class ChartComponent {
    */
   _subscribeToTimeRangeChanges() {
     if (!this.chart) return;
-    
-    this.chart
-      .timeScale()
-      .subscribeVisibleLogicalRangeChange(
-        this.handleTimeRangeChange.bind(this)
-      );
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(this.handleTimeRangeChange.bind(this));
   }
 
   /**
@@ -145,28 +139,7 @@ export class ChartComponent {
    */
   _unsubscribeFromTimeRangeChanges() {
     if (!this.chart) return;
-    
-    this.chart
-      .timeScale()
-      .unsubscribeVisibleLogicalRangeChange(
-        this.handleTimeRangeChange.bind(this)
-      );
-  }
-
-  /**
-   * Get custom price formatter
-   */
-  getPriceFormatter() {
-    return (price) => {
-      return formatPrice(price, this.symbol);
-    };
-  }
-
-  /**
-   * Get time format options based on interval
-   */
-  getTimeFormatOptions() {
-    return "{yyyy}-{MM}-{dd} {HH}:{mm}";
+    this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.handleTimeRangeChange.bind(this));
   }
 
   /**
@@ -222,42 +195,25 @@ export class ChartComponent {
       <div class="tooltip-title">${this.symbol} - ${formattedDate}</div>
       <div class="tooltip-data">
         <div class="tooltip-label">Open:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.open,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.open, this.symbol)}</div>
         
         <div class="tooltip-label">High:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.high,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.high, this.symbol)}</div>
         
         <div class="tooltip-label">Low:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.low,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.low, this.symbol)}</div>
         
         <div class="tooltip-label">Close:</div>
-        <div class="tooltip-value">${formatPrice(
-          dataPoint.close,
-          this.symbol
-        )}</div>
+        <div class="tooltip-value">${formatPrice(dataPoint.close, this.symbol)}</div>
         
         <div class="tooltip-label">Volume:</div>
         <div class="tooltip-value">${formattedVolume}</div>
         
         <div class="tooltip-label">Change:</div>
-        <div class="tooltip-value ${changeClass}">${signChar}${formatPrice(
-      change,
-      this.symbol
-    )}</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${formatPrice(change, this.symbol)}</div>
         
         <div class="tooltip-label">% Change:</div>
-        <div class="tooltip-value ${changeClass}">${signChar}${percentChange.toFixed(
-      2
-    )}%</div>
+        <div class="tooltip-value ${changeClass}">${signChar}${percentChange.toFixed(2)}%</div>
       </div>
     `;
 
@@ -294,7 +250,6 @@ export class ChartComponent {
    */
   findDataPointByTime(time) {
     if (!this.data || !this.data.length) return null;
-
     return this.data.find((candle) => candle.time === time);
   }
 
@@ -303,7 +258,6 @@ export class ChartComponent {
    */
   handleResize() {
     if (!this.chart) return;
-
     const { width, height } = this.container.getBoundingClientRect();
     this.chart.resize(width, height);
   }
@@ -412,7 +366,7 @@ export class ChartComponent {
     if (!this.lastLoadedRange || !this.data.length) return false;
     
     // Allow for some buffer at the edges
-    const buffer = parseFloat(this.interval) * 24 * 60 * 60 * 1000; // One day buffer
+    const buffer = 24 * 60 * 60 * 1000; // One day buffer
     const loadedStart = this.lastLoadedRange.start - buffer;
     const loadedEnd = this.lastLoadedRange.end + buffer;
     
@@ -450,39 +404,28 @@ export class ChartComponent {
         // Fetch instrument data if not available
         if (!this.instrumentData) {
           try {
-            this.instrumentData = await this.apiService.fetchInstrument(
-              this.symbol
-            );
+            this.instrumentData = await this.apiService.fetchInstrument(this.symbol);
             console.log(`📌 Instrument data: ${this.symbol}`, {
               category: this.instrumentData.category,
-              hasTradingHours: !!(
-                this.instrumentData.market &&
-                this.instrumentData.market.length > 0
-              ),
+              hasTradingHours: !!(this.instrumentData.market && this.instrumentData.market.length > 0),
             });
           } catch (error) {
             console.warn("Could not fetch instrument data:", error.message);
           }
-        } else {
-          console.log(`📌 Using cached instrument data: ${this.symbol}`);
         }
 
         // For instruments with limited trading hours, adjust the start time
         let adjustedStart = start;
         if (this.instrumentData && this.instrumentData.category !== "Crypto") {
           const originalStart = new Date(start).toISOString();
-          adjustedStart = findNearestTradingDay(
-            this.instrumentData,
-            adjustedStart
-          );
-
+          adjustedStart = findNearestTradingDay(this.instrumentData, adjustedStart);
+          
           if (adjustedStart !== start) {
+            const dayDiff = Math.round((start - adjustedStart) / (1000 * 60 * 60 * 24));
             console.log(`⏱️ Adjusted start time for ${this.symbol}`, {
               original: originalStart,
               adjusted: new Date(adjustedStart).toISOString(),
-              difference: `${Math.round(
-                (start - adjustedStart) / (1000 * 60 * 60 * 24)
-              )} days`,
+              difference: `${dayDiff} days`,
             });
           }
         }
@@ -515,10 +458,7 @@ export class ChartComponent {
           // Update loaded range
           if (this.lastLoadedRange) {
             this.lastLoadedRange = {
-              start: Math.min(
-                adjustedStart,
-                this.lastLoadedRange.start
-              ),
+              start: Math.min(adjustedStart, this.lastLoadedRange.start),
               end: Math.max(end, this.lastLoadedRange.end),
             };
           } else {
@@ -530,13 +470,10 @@ export class ChartComponent {
           
           console.log(`📊 Updated data range: ${new Date(this.lastLoadedRange.start).toISOString()} - ${new Date(this.lastLoadedRange.end).toISOString()}`);
         } else {
-          console.warn(
-            `⚠️ No candles received: ${this.symbol}@${this.interval}`,
-            {
-              start: new Date(adjustedStart).toISOString(),
-              end: new Date(end).toISOString(),
-            }
-          );
+          console.warn(`⚠️ No candles received: ${this.symbol}@${this.interval}`, {
+            start: new Date(adjustedStart).toISOString(),
+            end: new Date(end).toISOString(),
+          });
         }
 
         return this.data;
@@ -557,8 +494,6 @@ export class ChartComponent {
    */
   updateSeries() {
     if (!this.data || !this.candleSeries || this.data.length === 0) return;
-
-    // Update candlestick series
     this.candleSeries.setData(this.data);
   }
 
@@ -628,14 +563,8 @@ export class ChartComponent {
    * Load symbol and interval
    */
   async loadSymbol(symbol, interval) {
-    if (
-      this.symbol === symbol &&
-      this.interval === interval &&
-      this.isLoading
-    ) {
-      console.log(
-        `⏭️ Skipping loadSymbol - already loading same symbol/interval`
-      );
+    if (this.symbol === symbol && this.interval === interval && this.isLoading) {
+      console.log(`⏭️ Skipping loadSymbol - already loading same symbol/interval`);
       return;
     }
 
@@ -656,9 +585,7 @@ export class ChartComponent {
       }
 
       // Cache current data if any
-      const currentKey =
-        this.symbol && this.interval ? `${this.symbol}:${this.interval}` : null;
-
+      const currentKey = this.symbol && this.interval ? `${this.symbol}:${this.interval}` : null;
       if (currentKey && this.data.length > 0) {
         this.dataCache.set(currentKey, {
           data: [...this.data],
@@ -680,9 +607,7 @@ export class ChartComponent {
 
         // Use cached data
         this.data = [...cachedData.data];
-        this.lastLoadedRange = cachedData.range
-          ? { ...cachedData.range }
-          : null;
+        this.lastLoadedRange = cachedData.range ? { ...cachedData.range } : null;
         this.instrumentData = cachedData.instrumentData;
         this.updateSeries();
       } else {
@@ -699,17 +624,6 @@ export class ChartComponent {
         // Fetch instrument data first
         try {
           this.instrumentData = await this.apiService.fetchInstrument(symbol);
-
-          // Adjust start time for non-crypto instruments
-          if (
-            this.instrumentData &&
-            this.instrumentData.category !== "Crypto"
-          ) {
-            const adjustedStart = findNearestTradingDay(this.instrumentData, start);
-            if (adjustedStart !== start) {
-              console.log(`⏱️ Adjusted initial start time for ${symbol}`);
-            }
-          }
         } catch (error) {
           console.warn("Could not fetch instrument data:", error.message);
           // Continue without instrument data
@@ -730,7 +644,7 @@ export class ChartComponent {
           high: candle.high,
           low: candle.low,
           close: candle.close,
-          volume: candle.volume || 0, // Keep volume for the tooltip
+          volume: candle.volume || 0,
         };
 
         // Update or add to data array
@@ -762,15 +676,12 @@ export class ChartComponent {
         this.realtimeCallback
       );
 
-      // Fit content to view (temporarily suspend time range change handling)
+      // Fit content to view
       this.chart.timeScale().fitContent();
 
       return this.data;
     } catch (error) {
-      console.error(
-        `Error loading symbol ${symbol} with interval ${interval}:`,
-        error
-      );
+      console.error(`Error loading symbol ${symbol} with interval ${interval}:`, error);
       throw error;
     } finally {
       this.setLoadingState(false);
@@ -792,7 +703,6 @@ export class ChartComponent {
    */
   async changeInterval(interval) {
     if (this.interval === interval || !this.symbol) return;
-
     return this.loadSymbol(this.symbol, interval);
   }
 

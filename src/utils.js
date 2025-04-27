@@ -14,42 +14,25 @@ export function parseInterval(interval) {
   }
 
   switch (unit) {
-    case "m":
-      return value * 60 * 1000;
-    case "h":
-      return value * 60 * 60 * 1000;
-    case "d":
-      return value * 24 * 60 * 60 * 1000;
-    case "w":
-      return value * 7 * 24 * 60 * 60 * 1000;
-    case "o":
-      return value * 30 * 24 * 60 * 60 * 1000; // Approximate for months
-    default:
-      return 24 * 60 * 60 * 1000;
+    case "m": return value * 60 * 1000;
+    case "h": return value * 60 * 60 * 1000;
+    case "d": return value * 24 * 60 * 60 * 1000;
+    case "w": return value * 7 * 24 * 60 * 60 * 1000;
+    case "o": return value * 30 * 24 * 60 * 60 * 1000; // Approximate for months
+    default: return 24 * 60 * 60 * 1000;
   }
 }
 
 /**
- * Format price with precision based on value.
- * In future, use the digits from instrument data.
+ * Format price with precision based on value
  */
 export function formatPrice(price, _symbol) {
   if (price === undefined || price === null || isNaN(price)) {
     return "N/A";
   }
 
-  let precision = undefined;
+  let precision = price < 0.1 ? 6 : price < 1 ? 4 : 2;
 
-  // Arbitrary... just a guide
-  if (price < 0.1) {
-    precision = 6;
-  } else if (price < 1) {
-    precision = 4;
-  } else {
-    precision = 2;
-  }
-
-  // Format the price with commas for thousands and fixed precision
   return price.toLocaleString("en-US", {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision,
@@ -64,81 +47,53 @@ export function formatDate(timestamp, interval) {
 
   const date = new Date(timestamp * 1000);
 
-  // Get interval details
+  // Get interval unit
   let unit = "d";
-  let value = 1;
-
   if (interval && typeof interval === "string") {
     unit = interval.slice(-1);
-    value = parseInt(interval.slice(0, -1), 10);
   }
 
-  // Different formats based on interval
-  if (unit === "m") {
-    // Minutes
-    return (
-      date.toLocaleDateString("en-US", {
+  // Format based on interval unit
+  switch (unit) {
+    case "m":
+    case "h":
+      return date.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
-        year: "numeric",
-      }) +
-      " " +
+        year: "numeric"
+      }) + " " + 
       date.toLocaleTimeString("en-US", {
         hour: "2-digit",
-        minute: "2-digit",
-      })
-    );
-  } else if (unit === "h") {
-    // Hours
-    return (
+        minute: "2-digit"
+      });
+    case "d":
+      return date.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      });
+    case "w":
+      return "Week of " + 
       date.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
-        year: "numeric",
-      }) +
-      " " +
+        year: "numeric"
+      });
+    case "o":
+      return date.toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric"
+      });
+    default:
+      return date.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      }) + " " + 
       date.toLocaleTimeString("en-US", {
         hour: "2-digit",
-        minute: "2-digit",
-      })
-    );
-  } else if (unit === "d") {
-    // Days
-    return date.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-  } else if (unit === "w") {
-    // Weeks
-    return (
-      "Week of " +
-      date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      })
-    );
-  } else if (unit === "o") {
-    // Months
-    return date.toLocaleDateString("en-US", {
-      month: "long",
-      year: "numeric",
-    });
-  } else {
-    // Fallback
-    return (
-      date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      }) +
-      " " +
-      date.toLocaleTimeString("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    );
+        minute: "2-digit"
+      });
   }
 }
 
@@ -176,10 +131,10 @@ export function formatCandleData(candles) {
         high,
         low,
         close,
-        volume, // Keep volume data for tooltip display
+        volume,
       };
     })
-    .filter((candle) => candle !== null)
+    .filter(candle => candle !== null)
     .sort((a, b) => a.time - b.time);
 }
 
@@ -215,19 +170,15 @@ export function mergeCandles(existingData, newData) {
   // Use Map for deduplication by timestamp
   const candleMap = new Map();
 
-  // Pre-sort data to potentially improve merging performance
-  const sortedExisting = [...existingData].sort((a, b) => a.time - b.time);
-  const sortedNew = [...newData].sort((a, b) => a.time - b.time);
-
   // Put existing data in the map
-  for (const candle of sortedExisting) {
+  for (const candle of existingData) {
     if (candle && typeof candle.time === "number") {
       candleMap.set(candle.time, candle);
     }
   }
 
   // Add or update with new data
-  for (const candle of sortedNew) {
+  for (const candle of newData) {
     if (candle && typeof candle.time === "number") {
       candleMap.set(candle.time, candle);
     }
@@ -239,7 +190,6 @@ export function mergeCandles(existingData, newData) {
 
 /**
  * Calculate optimal data range for a given viewport
- * With more efficient padding calculation
  */
 export function calculateDataRange(interval, viewportWidth, start, end) {
   const intervalMs = parseInterval(interval);
@@ -266,7 +216,6 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
   console.log(`🔢 Calculated data range for ${interval}:`, {
     visibleBars,
     padding,
-    paddingFactor,
     requestedRange: {
       start: new Date(optimalStart).toISOString(),
       end: new Date(optimalEnd).toISOString(),
@@ -282,48 +231,54 @@ export function calculateDataRange(interval, viewportWidth, start, end) {
 }
 
 /**
- * Check if market is open at a given timestamp
+ * Check if a day is a trading day for the instrument
  */
-export function isMarketOpen(instrument, timestamp) {
-  // For 24/7 markets like crypto, always return true
-  if (!instrument || instrument.category === "Crypto") {
+export function isTradingDay(instrument, dayIndex) {
+  if (!instrument || !instrument.market || !Array.isArray(instrument.market)) {
+    return false;
+  }
+  
+  // For crypto, always return true
+  if (instrument.category === "Crypto") {
     return true;
   }
-
-  if (!instrument.market || !Array.isArray(instrument.market)) {
-    return false;
-  }
-
-  const date = new Date(timestamp);
-  const day = date.getUTCDay(); // 0-6 (Sunday-Saturday)
-  const hour = date.getUTCHours();
-  const minute = date.getUTCMinutes();
-
-  // Find market hours for the current day
-  const marketHours = instrument.market.find(
-    (m) => m.open && m.open.day === day
-  );
-
-  if (!marketHours) {
-    // No hours defined for this day
-    return false;
-  }
-
-  // Check if current time is within market hours
-  const openHour = marketHours.open.hour;
-  const openMinute = marketHours.open.minute;
-  const closeHour = marketHours.close.hour;
-  const closeMinute = marketHours.close.minute;
-
-  const currentMinutes = hour * 60 + minute;
-  const openMinutes = openHour * 60 + openMinute;
-  const closeMinutes = closeHour * 60 + closeMinute;
-
-  return currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
+  
+  // Find if this day has market hours
+  return instrument.market.some(m => m.open && m.open.day === dayIndex);
 }
 
 /**
- * Find the nearest trading day in the past
+ * Get market open time for a specific date
+ * Returns timestamp in milliseconds or null if market is closed that day
+ */
+export function getMarketOpenTime(instrument, date) {
+  if (!instrument || !instrument.market || !Array.isArray(instrument.market)) {
+    return null;
+  }
+  
+  // For crypto, return the same time (24/7 market)
+  if (instrument.category === "Crypto") {
+    return date.getTime();
+  }
+  
+  const day = date.getUTCDay();
+  
+  // Find market hours for this day
+  const marketHours = instrument.market.find(m => m.open && m.open.day === day);
+  if (!marketHours) {
+    return null; // No trading on this day
+  }
+  
+  // Create a new date representing market open time
+  const openTime = new Date(date);
+  openTime.setUTCHours(marketHours.open.hour, marketHours.open.minute, 0, 0);
+  
+  return openTime.getTime();
+}
+
+/**
+ * Find the nearest past trading day for a given timestamp
+ * Returns timestamp adjusted to market open time
  */
 export function findNearestTradingDay(instrument, timestamp) {
   // For 24/7 markets like crypto, return the same timestamp
@@ -332,83 +287,48 @@ export function findNearestTradingDay(instrument, timestamp) {
   }
 
   if (!instrument.market || !Array.isArray(instrument.market)) {
-    console.log(
-      `⚠️ Market Hours: No market data for ${instrument.symbol || "unknown"}`
-    );
+    console.log(`⚠️ No market data for ${instrument.symbol || "unknown"}`);
     return timestamp;
   }
 
+  const date = new Date(timestamp);
   const originalDate = new Date(timestamp);
-  console.log(
-    `🔍 Finding trading day for ${instrument.symbol} from:`,
-    originalDate.toISOString()
-  );
-
-  let currentTimestamp = timestamp;
-  const oneDayMs = 24 * 60 * 60 * 1000;
-
-  // Look back up to 30 days
-  for (let i = 0; i < 30; i++) {
-    const date = new Date(currentTimestamp);
-    const day = date.getUTCDay();
-    const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day];
-
-    const isOpen = isMarketOpen(instrument, currentTimestamp);
-    console.log(
-      `  ${dayName} ${date.toISOString().split("T")[0]}: ${
-        isOpen ? "✅ OPEN" : "❌ CLOSED"
-      }`
-    );
-
-    if (isOpen) {
-      console.log(`  ✅ Found trading day: ${date.toISOString()}`);
-      return currentTimestamp;
+  const dayInMs = 24 * 60 * 60 * 1000;
+  
+  console.log(`🔍 Finding nearest trading day for ${instrument.symbol} from:`, originalDate.toISOString());
+  
+  // Try the current day first
+  let marketOpen = getMarketOpenTime(instrument, date);
+  if (marketOpen !== null) {
+    const currentDayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getUTCDay()];
+    console.log(`  ✅ ${currentDayName} ${date.toISOString().split('T')[0]} is a trading day`);
+    
+    // If the timestamp is before market open on a trading day, 
+    // use market open time instead
+    if (timestamp < marketOpen) {
+      console.log(`  ⏱️ Adjusted to market open time: ${new Date(marketOpen).toISOString()}`);
+      return marketOpen;
     }
-
-    // Go back one day
-    currentTimestamp -= oneDayMs;
+    
+    // If timestamp is after market open, use the timestamp
+    return timestamp;
   }
-
-  console.log(
-    `⚠️ No trading day found in last 30 days for ${instrument.symbol}`
-  );
+  
+  // Look back up to 30 days to find a trading day
+  for (let i = 1; i <= 30; i++) {
+    date.setTime(originalDate.getTime() - (i * dayInMs));
+    const dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getUTCDay()];
+    
+    marketOpen = getMarketOpenTime(instrument, date);
+    if (marketOpen !== null) {
+      console.log(`  ✅ Found trading day: ${dayName} ${date.toISOString().split('T')[0]}`);
+      console.log(`  ⏱️ Using market open time: ${new Date(marketOpen).toISOString()}`);
+      return marketOpen;
+    }
+    
+    console.log(`  ❌ ${dayName} ${date.toISOString().split('T')[0]} is not a trading day`);
+  }
+  
+  console.log(`⚠️ No trading day found in last 30 days for ${instrument.symbol}, using original timestamp`);
   return timestamp;
-}
-
-/**
- * Check if a timestamp is within a range
- */
-export function isTimestampInRange(timestamp, start, end) {
-  if (
-    typeof timestamp !== "number" ||
-    typeof start !== "number" ||
-    typeof end !== "number"
-  ) {
-    return false;
-  }
-  return timestamp >= start && timestamp <= end;
-}
-
-/**
- * Calculate subscription range with padding
- */
-export function calculateSubscriptionRange(interval, visibleRange) {
-  if (
-    !visibleRange ||
-    typeof visibleRange.from !== "number" ||
-    typeof visibleRange.to !== "number"
-  ) {
-    const now = Math.floor(Date.now() / 1000);
-    return { from: now - 86400, to: now + 86400 }; // Default 1 day each way
-  }
-
-  const intervalMs = parseInterval(interval);
-  const intervalSec = intervalMs / 1000;
-  const { from, to } = visibleRange;
-
-  // Add padding (10 bars)
-  return {
-    from: from - intervalSec * 10,
-    to: to + intervalSec * 10,
-  };
 }
