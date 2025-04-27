@@ -235,7 +235,7 @@ export class ApiService {
    * Fetch historical candle data
    */
   async fetchCandles(symbol, width, options = {}) {
-    const { limit, start, end } = options;
+    const { start, end } = options;
 
     // Ensure timestamps are integers
     const formattedStart = start ? Math.floor(start) : undefined;
@@ -250,7 +250,6 @@ export class ApiService {
     const params = {
       symbol,
       width,
-      ...(limit ? { limit } : {}),
       ...(formattedStart ? { start: formattedStart } : {}),
       ...(formattedEnd ? { end: formattedEnd } : {}),
       referer: this.config.referer,
@@ -259,10 +258,9 @@ export class ApiService {
     console.log(`📊 API Request: ${symbol}@${width}`, {
       start: formattedStart ? new Date(formattedStart).toISOString() : "undefined",
       end: formattedEnd ? new Date(formattedEnd).toISOString() : "undefined",
-      limit: limit || "no limit",
     });
 
-    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${formattedEnd || "end"}:${limit || "nolimit"}`;
+    const cacheKey = `candles:${symbol}:${width}:${formattedStart || "start"}:${formattedEnd || "end"}`;
 
     return this.fetchWithCache("/candle", params, cacheKey);
   }
